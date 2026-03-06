@@ -9,7 +9,7 @@ This workspace contains three git repositories organized by GitHub org:
 | Path | Repo | Description |
 |------|------|-------------|
 | `opendatahub-io/odh-dashboard/` | [opendatahub-io/odh-dashboard](https://github.com/opendatahub-io/odh-dashboard) | ODH Dashboard monorepo (React/TypeScript frontend) |
-| `kubeflow/model-registry/` | [kubeflow/model-registry](https://github.com/kubeflow/model-registry) | Upstream Kubeflow Model Registry (Go + Python backend) |
+| `kubeflow/model-registry/` | [kubeflow/model-registry](https://github.com/kubeflow/model-registry) | Upstream Kubeflow Model Registry (Go backend + UI under clients/ui) |
 | `opendatahub-io/mod-arch-library/` | [opendatahub-io/mod-arch-library](https://github.com/opendatahub-io/mod-arch-library) | Modular Architecture shared library (React/TypeScript) |
 
 Each repo has its own `.git` directory and is gitignored by this workspace repo.
@@ -21,16 +21,20 @@ mod-arch-library (mod-arch-core, mod-arch-shared, mod-arch-kubeflow)
         |
         | npm packages consumed by
         v
-odh-dashboard/packages/model-registry/upstream/frontend
+model-registry/clients/ui  (upstream frontend + BFF)
         |
-        | frontend consumes REST API defined by
+        | synced via update-subtree to
         v
-model-registry (Go backend, OpenAPI spec)
+odh-dashboard/packages/model-registry/upstream  (+ ODH extensions)
+        |
+        | frontend consumes REST API from
+        v
+model-registry  (Go backend, OpenAPI spec)
 ```
 
 - **mod-arch-library** provides shared React components, hooks, context providers, and theming consumed by the model-registry UI and other odh-dashboard packages.
 - **odh-dashboard** is a monorepo. The `packages/model-registry/` package contains the Model Registry UI. `packages/model-registry/upstream/` mirrors the upstream kubeflow repo structure. `packages/model-registry/src/` has downstream-only code.
-- **model-registry** (kubeflow) is the upstream Go backend that provides the REST API the frontend consumes. Its OpenAPI spec defines the API contract.
+- **model-registry** (kubeflow) is the upstream repo containing the Go REST API backend, the OpenAPI spec, and the UI code under `clients/ui/` (frontend + BFF). The `clients/ui/` code is regularly synced to `odh-dashboard/packages/model-registry/upstream/` using the `update-subtree` script in odh-dashboard (orchestrated via the `/model-registry-upstream-sync` skill in that repo). The odh-dashboard copy layers on ODH-specific extensions.
 
 ## Reading Repo-Specific Instructions
 

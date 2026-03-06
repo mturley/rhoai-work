@@ -1,0 +1,27 @@
+# RHOAI Dashboard Workspace
+
+Multi-repo coordination workspace for working across the RHOAI Dashboard team's repositories using Claude Code.
+
+## Repos
+
+- **[odh-dashboard](https://github.com/opendatahub-io/odh-dashboard)** — Frontend dashboard monorepo (React/TypeScript)
+- **[model-registry](https://github.com/kubeflow/model-registry)** — Upstream model registry backend (Go + Python)
+- **[mod-arch-library](https://github.com/opendatahub-io/mod-arch-library)** — Shared modular architecture library (React/TypeScript)
+
+## Setup
+
+Clone the repos into their org-namespaced directories (these are gitignored):
+
+```bash
+git clone git@github.com:opendatahub-io/odh-dashboard.git opendatahub-io/odh-dashboard
+git clone git@github.com:kubeflow/model-registry.git kubeflow/model-registry
+git clone git@github.com:opendatahub-io/mod-arch-library.git opendatahub-io/mod-arch-library
+```
+
+Create the skills-context symlink for Claude Code tool configuration:
+
+```bash
+ln -s ~/.claude/skills/.context skills-context
+```
+
+See `CLAUDE.md` for workspace instructions used by Claude Code.

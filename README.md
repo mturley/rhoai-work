@@ -18,7 +18,7 @@ git clone git@github.com:kubeflow/model-registry.git kubeflow/model-registry
 git clone git@github.com:opendatahub-io/mod-arch-library.git opendatahub-io/mod-arch-library
 ```
 
-Create the skills-context symlink for Claude Code tool configuration:
+Create the skills-context symlink for Claude Code tool configuration (the `.context` directory comes from [mturley/claude-skills](https://github.com/mturley/claude-skills)):
 
 ```bash
 ln -s ~/.claude/skills/.context skills-context

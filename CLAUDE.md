@@ -14,6 +14,8 @@ This workspace contains three git repositories organized by GitHub org:
 
 Each repo has its own `.git` directory and is gitignored by this workspace repo.
 
+A VS Code multi-root workspace file (`rhoai-work.code-workspace`) is configured with all three repos plus the workspace root as top-level folders, enabling cross-repo file search and unified SCM views.
+
 ## Repo Relationships
 
 ```

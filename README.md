@@ -24,4 +24,8 @@ Create the skills-context symlink for Claude Code tool configuration (the `.cont
 ln -s ~/.claude/skills/.context skills-context
 ```
 
+## VS Code Workspace
+
+Open `rhoai-work.code-workspace` in VS Code to get a [multi-root workspace](https://code.visualstudio.com/docs/editor/multi-root-workspaces) with all three repos plus the workspace root as top-level folders. This provides cross-repo file search, unified SCM views, and per-repo git integration.
+
 See `CLAUDE.md` for workspace instructions used by Claude Code.

@@ -27,4 +27,4 @@ Switch the active cluster and/or user in the `.env.local` file at `opendatahub-i
 
 6. **Log in** by running `make login` from the `opendatahub-io/odh-dashboard` directory, then run `oc cluster-info` and `oc whoami` to verify the connection.
 
-7. **Confirm** by printing a summary of the new active configuration (cluster name, OC_URL, OC_USER, OC_PROJECT, ODH_APP).
+7. **Confirm** by printing a summary of the new active configuration (cluster name, OC_URL, OC_USER, OC_PROJECT, ODH_APP). Also include any `## url:` lines from the active cluster's section as clickable links, labeled by their prefix (e.g. "OCP", "ODH", "Console").

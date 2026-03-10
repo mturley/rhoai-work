@@ -7,13 +7,13 @@
   ],
   "settings": {
     "workbench.colorCustomizations": {
-      "titleBar.activeBackground": "#1a3a5c",
+      "titleBar.activeBackground": "#001a33",
       "titleBar.activeForeground": "#ffffff",
-      "titleBar.inactiveBackground": "#122840",
+      "titleBar.inactiveBackground": "#001a33",
       "titleBar.inactiveForeground": "#cccccc",
-      "activityBar.background": "#1a3a5c",
+      "activityBar.background": "#001a33",
       "activityBar.foreground": "#ffffff",
-      "statusBar.background": "#1a3a5c",
+      "statusBar.background": "#002b55",
       "statusBar.foreground": "#ffffff"
     }
   }

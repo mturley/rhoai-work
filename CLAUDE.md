@@ -90,6 +90,10 @@ Read the relevant context file before using the corresponding MCP tools.
 - Check consumers in `opendatahub-io/odh-dashboard/packages/*/frontend/package.json`
 - After publishing a new mod-arch version, update the dependency version in the consuming packages
 
+### File Links in VS Code
+
+When outputting markdown links to files (for clickable references in VS Code), use paths relative to the workspace root (`rhoai-work/`). Since repos are nested under org-name directories, file links must include the repo path prefix (e.g. `kubeflow/model-registry/path/to/file.ts`, not just `path/to/file.ts`).
+
 ### Navigating the model-registry UI code
 - Upstream UI code: `opendatahub-io/odh-dashboard/packages/model-registry/upstream/frontend/src/`
 - Downstream-only code: `opendatahub-io/odh-dashboard/packages/model-registry/src/`

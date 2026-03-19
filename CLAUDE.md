@@ -16,6 +16,21 @@ Each repo has its own `.git` directory and is gitignored by this workspace repo.
 
 A VS Code multi-root workspace file (`rhoai-work.code-workspace`) is configured with all three repos plus the workspace root as top-level folders, enabling cross-repo file search and unified SCM views.
 
+### Working in Project Repos
+
+**IMPORTANT:** The workspace root (`rhoai-work/`) is its own git repo, separate from the project repos inside it. **All git operations, `gh` CLI commands, and worktree creation must happen from within the correct project repo** — never from the workspace root.
+
+Running `gh` or `git` commands from the workspace root will target the `rhoai-work` repo itself (e.g. `gh pr view` would look for PRs on `mturley/rhoai-work`, not on the intended project repo). This applies to all operations: `git fetch`, `git checkout`, `gh pr diff`, `gh pr view`, `gh pr checks`, worktree creation, etc.
+
+**Before any git/gh operation:**
+1. Determine which project repo the work belongs to based on the task context (PR URL, files to change, etc.).
+2. `cd` into that repo's directory (e.g. `cd /Users/mturley/git/rhoai-work/opendatahub-io/odh-dashboard`).
+3. If it's unclear which repo to use, ask the user before proceeding.
+
+**Exception:** Changes to workspace-level files (this `CLAUDE.md`, `rhoai-work.code-workspace`, `issue-drafts/`, etc.) belong to the root `rhoai-work` repo and should be committed there.
+
+**For worktrees specifically:** When creating a worktree (via `EnterWorktree` or `git worktree add`), verify with `git rev-parse --show-toplevel` that you're in the intended project repo so the worktree is created from that repo's git history.
+
 ## Repo Relationships
 
 ```

@@ -29,7 +29,7 @@ Running `gh` or `git` commands from the workspace root will target the `rhoai-wo
 
 **Exception:** Changes to workspace-level files (this `CLAUDE.md`, `rhoai-work.code-workspace`, `issue-drafts/`, etc.) belong to the root `rhoai-work` repo and should be committed there.
 
-**For worktrees specifically:** When creating a worktree (via `EnterWorktree` or `git worktree add`), verify with `git rev-parse --show-toplevel` that you're in the intended project repo so the worktree is created from that repo's git history.
+**For worktrees specifically:** When creating a worktree (via `EnterWorktree` or `git worktree add`), verify with `git rev-parse --show-toplevel` that you're in the intended project repo so the worktree is created from that repo's git history. **Always create worktrees in `~/git/.worktrees/`** (not in the default `.claude/worktrees/` inside the repo). The `.claude/worktrees/` directory is not gitignored in all projects and creates unwanted clutter. Use `git worktree add ~/git/.worktrees/<repo>-<branch> <branch>` to keep worktrees in a central location outside any repo.
 
 ## Repo Relationships
 

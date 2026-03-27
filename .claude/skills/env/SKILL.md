@@ -25,6 +25,6 @@ Switch the active cluster and/or user in the `.env.local` file at `opendatahub-i
    - If the user selected an alternative OC_USER, swap it: add `## alt: ` prefix to the current OC_USER line and remove the `## alt: ` prefix from the selected one.
    - Update the section header comments: add `(ACTIVE)` to the new cluster's header and remove it from the old one.
 
-6. **Log in** by running `make login` from the `opendatahub-io/odh-dashboard` directory, then run `oc cluster-info` and `oc whoami` to verify the connection.
+6. **Log in** by running `make login` from the `opendatahub-io/odh-dashboard` directory, then run `oc cluster-info` and `oc whoami` to verify the connection. If the login fails with a timeout or connection error, advise the user to check that they are connected to the VPN.
 
 7. **Confirm** by printing a summary of the new active configuration (cluster name, OC_URL, OC_USER, OC_PROJECT, ODH_APP). Also include any `## url:` lines from the active cluster's section as clickable links, labeled by their prefix (e.g. "OCP", "ODH", "Console").

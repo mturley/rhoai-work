@@ -6,7 +6,8 @@
       "mcp__puppeteer__puppeteer_new_page",
       "mcp__puppeteer__puppeteer_screenshot",
       "mcp__puppeteer__puppeteer_get_text",
-      "mcp__puppeteer__puppeteer_click"
+      "mcp__puppeteer__puppeteer_click",
+      "Bash(ls -d .claude/worktrees/:*)"
     ]
   }
 }

@@ -4,7 +4,8 @@
     { "path": "opendatahub-io/odh-dashboard", "name": "odh-dashboard" },
     { "path": "kubeflow/model-registry", "name": "model-registry" },
     { "path": "opendatahub-io/mod-arch-library", "name": "mod-arch-library" },
-    { "path": "opendatahub-io/model-registry-operator", "name": "model-registry-operator" }
+    { "path": "opendatahub-io/model-registry-operator", "name": "model-registry-operator" },
+    { "path": "kubeflow/notebooks", "name": "notebooks" }
   ],
   "settings": {
     "workbench.colorCustomizations": {

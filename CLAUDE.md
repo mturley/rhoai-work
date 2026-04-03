@@ -56,7 +56,7 @@ notebooks       (workspaces backend)
 - **mod-arch-library** provides shared React components, hooks, context providers, and theming consumed by the model-registry UI, notebooks UI, and other odh-dashboard packages.
 - **odh-dashboard** is a monorepo. The `packages/model-registry/` package contains the Model Registry UI. `packages/model-registry/upstream/` mirrors the upstream kubeflow repo structure. `packages/model-registry/src/` has downstream-only code. Similarly, `packages/notebooks/upstream/` mirrors upstream from `kubeflow/notebooks`.
 - **model-registry** (kubeflow) is the upstream repo containing the Go REST API backend, the OpenAPI spec, and the UI code under `clients/ui/` (frontend + BFF). The `clients/ui/` code is regularly synced to `odh-dashboard/packages/model-registry/upstream/` using the `update-subtree` script in odh-dashboard (orchestrated via the `/model-registry-upstream-sync` skill in that repo). The odh-dashboard copy layers on ODH-specific extensions.
-- **notebooks** (kubeflow) is the upstream repo for the Kubeflow Notebooks v2 workspaces feature. The `workspaces/` directory (frontend, backend, controller) is synced to `odh-dashboard/packages/notebooks/upstream/` via `update-subtree` from the `notebooks-v2` branch. The odh-dashboard copy layers on ODH-specific extensions.
+- **notebooks** (kubeflow) is the upstream repo for the Kubeflow Notebooks v2 workspaces feature. The repo's `main` branch is sparse; the active trunk is `notebooks-v2`. The `workspaces/` directory (frontend, backend, controller) is synced to `odh-dashboard/packages/notebooks/upstream/` via `update-subtree` from the `notebooks-v2` branch. Always create new branches from `upstream/notebooks-v2`. The odh-dashboard copy layers on ODH-specific extensions.
 
 ## Reading Repo-Specific Instructions
 
@@ -64,7 +64,7 @@ notebooks       (workspaces backend)
 
 - **odh-dashboard**: Read `opendatahub-io/odh-dashboard/AGENTS.md` (CLAUDE.md points to it). For specific tasks, check the agent-rules files under `opendatahub-io/odh-dashboard/docs/agent-rules/`.
 - **model-registry**: Read `kubeflow/model-registry/CLAUDE.md`. Key constraint: **never mention RHOAIENG Jira issues** in content pushed to this upstream repo.
-- **notebooks**: Read `kubeflow/notebooks/CLAUDE.md` (if it exists). Key constraint: **never mention RHOAIENG Jira issues** in content pushed to this upstream repo. Uses `upstream` remote for canonical repo, `origin` for fork. Work targets the `notebooks-v2` branch.
+- **notebooks**: Read `kubeflow/notebooks/CLAUDE.md` (if it exists). Key constraint: **never mention RHOAIENG Jira issues** in content pushed to this upstream repo. Uses `upstream` remote for canonical repo, `origin` for fork. The `main` branch is sparse — the active trunk is `notebooks-v2`. Always create new branches from `upstream/notebooks-v2` and target PRs to the `notebooks-v2` branch.
 - **mod-arch-library**: Read `opendatahub-io/mod-arch-library/AGENTS.md` (CLAUDE.md points to it). Uses Conventional Commits.
 
 ## Key Constraints Summary
@@ -73,7 +73,7 @@ These are extracted from the individual repo instructions for quick reference. A
 
 - **odh-dashboard**: Node >= 22, npm >= 10, Go >= 1.24 (for BFFs). Uses Turbo monorepo, PatternFly v6, Webpack Module Federation. Run `npm run lint`, `npm run test`, `npm run type-check` from repo root.
 - **model-registry**: Upstream open-source repo (kubeflow/model-registry). Uses `upstream` remote for canonical repo, `origin` for fork. **Never reference RHOAIENG Jira issues** in any content pushed upstream.
-- **notebooks**: Upstream open-source repo (kubeflow/notebooks). Uses `upstream` remote for canonical repo, `origin` for fork. Work targets the `notebooks-v2` branch. **Never reference RHOAIENG Jira issues** in any content pushed upstream.
+- **notebooks**: Upstream open-source repo (kubeflow/notebooks). Uses `upstream` remote for canonical repo, `origin` for fork. The `main` branch is sparse — the active trunk is `notebooks-v2`. Always branch from `upstream/notebooks-v2` and target PRs there. **Never reference RHOAIENG Jira issues** in any content pushed upstream.
 - **mod-arch-library**: Node >= 20, npm >= 10. Uses npm workspaces, Conventional Commits (`feat:`, `fix:`, `docs:`, etc.). No `.sort()` — use `.toSorted()`. Run `npm run build`, `npm run test`, `npm run lint` from repo root.
 
 ## Cross-Repo Jira Issues

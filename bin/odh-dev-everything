@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+iterm-new split-v "odh-dev-backend"
+iterm-new split-v "odh-dev-frontend"
+iterm-new split-v "odh-dev-mr-upstream-federated"

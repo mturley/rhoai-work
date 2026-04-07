@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$SCRIPT_DIR/_functions.sh"
+kfmr-bff
+make build
+make run

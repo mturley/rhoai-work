@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$SCRIPT_DIR/_functions.sh"
+odh-mr-upstream
+make dev-install-dependencies
+cd bff
+make build
+cd ..
+PORT=9100 make dev-start-federated INSECURE_SKIP_VERIFY=true

@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+iterm-new split-v "kfmr-dev-bff-mock"
+iterm-new split-v "kfmr-dev-frontend-pf"

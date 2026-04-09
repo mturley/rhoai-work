@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-source "$SCRIPT_DIR/_functions.sh"
-odh
-npm run dev
+iterm-new split-v "odh-dev-backend"
+iterm-new split-v "odh-dev-frontend"
+iterm-new split-v "odh-dev-mr-upstream-federated"

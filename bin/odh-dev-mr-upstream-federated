@@ -1,9 +1,19 @@
 #!/usr/bin/env bash
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/_functions.sh"
+
+if [[ -n "${WORKTREE_PORTS:-}" ]]; then
+  RANGE_START="${WORKTREE_PORTS%%-*}"
+  MR_FRONTEND_PORT="$((RANGE_START + 2))"
+  MR_BFF_PORT="$((RANGE_START + 3))"
+else
+  MR_FRONTEND_PORT=9100
+  MR_BFF_PORT=4000
+fi
+
 odh-mr-upstream
 make dev-install-dependencies
 cd bff
 make build
 cd ..
-PORT=9100 make dev-start-federated INSECURE_SKIP_VERIFY=true
+FEDERATED_FRONTEND_PORT="$MR_FRONTEND_PORT" FEDERATED_BFF_PORT="$MR_BFF_PORT" make dev-start-federated INSECURE_SKIP_VERIFY=true

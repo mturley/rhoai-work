@@ -1,4 +1,89 @@
 #!/usr/bin/env bash
-iterm-new split-v "odh-dev-backend"
-iterm-new split-v "odh-dev-frontend"
-iterm-new split-v "odh-dev-mr-upstream-federated"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# Resolve mprocs-motd.sh from the work-scripts repo (via worktree on PATH)
+WORKTREE_BIN="$(command -v worktree 2>/dev/null || true)"
+if [ -n "$WORKTREE_BIN" ]; then
+  MPROCS_MOTD="$(cd "$(dirname "$(readlink -f "$WORKTREE_BIN")")/../lib" && pwd)/mprocs-motd.sh"
+fi
+
+USE_ITERM=false
+USE_DEFAULT_PORTS=false
+USE_SHELL=true
+TITLE=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --iterm)
+      USE_ITERM=true
+      shift
+      ;;
+    --no-shell)
+      USE_SHELL=false
+      shift
+      ;;
+    --title=*)
+      TITLE="${1#--title=}"
+      shift
+      ;;
+    --title)
+      TITLE="$2"
+      shift 2
+      ;;
+    --default-ports)
+      USE_DEFAULT_PORTS=true
+      shift
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+
+# Use WORKTREE_TITLE as fallback title if --title was not passed
+if [[ -z "$TITLE" && -n "${WORKTREE_TITLE:-}" ]]; then
+  TITLE="$WORKTREE_TITLE"
+fi
+
+# Port range: use WORKTREE_PORTS env var, or default to 4010-4019 unless --default-ports
+if [[ "$USE_DEFAULT_PORTS" == true ]]; then
+  BACKEND_PORT_LABEL="4000"
+  FRONTEND_PORT_LABEL="4010"
+  MR_PORT_LABEL="9100"
+else
+  export WORKTREE_PORTS="${WORKTREE_PORTS:-4010-4019}"
+  RANGE_START="${WORKTREE_PORTS%%-*}"
+  BACKEND_PORT_LABEL="$RANGE_START"
+  FRONTEND_PORT_LABEL="$((RANGE_START + 1))"
+  MR_PORT_LABEL="$((RANGE_START + 2))"
+  echo "Dashboard: http://localhost:${FRONTEND_PORT_LABEL}"
+fi
+
+if [[ "$USE_ITERM" == true ]]; then
+  iterm-new split-v "odh-dev-frontend"
+  iterm-new split-v "odh-dev-backend"
+  iterm-new split-v "odh-dev-mr-upstream-federated"
+else
+  MPROCS_ARGS=()
+  [[ -n "$TITLE" ]] && MPROCS_ARGS+=(--proc-list-title "$TITLE")
+
+  if [[ "$USE_SHELL" == true ]]; then
+    SHELL_LABEL="[$(basename "$SHELL")]"
+    SHELL_CMD="$SHELL"
+    if [ -n "${MPROCS_MOTD:-}" ] && [ -x "$MPROCS_MOTD" ]; then
+      SHELL_CMD="$MPROCS_MOTD && exec $SHELL"
+    fi
+    MPROCS_ARGS+=(--names "$SHELL_LABEL,frontend:${FRONTEND_PORT_LABEL},backend:${BACKEND_PORT_LABEL},mr-upstream:${MR_PORT_LABEL}")
+    mprocs "${MPROCS_ARGS[@]}" \
+      "$SHELL_CMD" \
+      "$SCRIPT_DIR/odh-dev-frontend" \
+      "$SCRIPT_DIR/odh-dev-backend" \
+      "$SCRIPT_DIR/odh-dev-mr-upstream-federated"
+  else
+    MPROCS_ARGS+=(--names "frontend:${FRONTEND_PORT_LABEL},backend:${BACKEND_PORT_LABEL},mr-upstream:${MR_PORT_LABEL}")
+    mprocs "${MPROCS_ARGS[@]}" \
+      "$SCRIPT_DIR/odh-dev-frontend" \
+      "$SCRIPT_DIR/odh-dev-backend" \
+      "$SCRIPT_DIR/odh-dev-mr-upstream-federated"
+  fi
+fi

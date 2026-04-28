@@ -4,10 +4,10 @@ source "$SCRIPT_DIR/_functions.sh"
 
 if [[ -n "${WORKTREE_PORTS:-}" ]]; then
   RANGE_START="${WORKTREE_PORTS%%-*}"
+  export ODH_PORT="$((RANGE_START + 1))"
   export BACKEND_PORT="$RANGE_START"
-  export MODULE_FEDERATION_CONFIG="$("$SCRIPT_DIR/odh-mf-config" "modelRegistry=$((RANGE_START + 2))")"
 fi
 
 odh
-cd backend
-npm run start:dev
+cd frontend
+npm run start:dev:mf

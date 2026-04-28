@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/_functions.sh"
+
+if [[ -n "${WORKTREE_PORTS:-}" ]]; then
+  RANGE_START="${WORKTREE_PORTS%%-*}"
+  export ODH_PORT="$((RANGE_START + 1))"
+  export BACKEND_PORT="$RANGE_START"
+fi
+
 odh
 cd frontend
 npm run start:dev

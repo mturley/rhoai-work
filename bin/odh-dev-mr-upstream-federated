@@ -16,4 +16,4 @@ make dev-install-dependencies
 cd bff
 make build
 cd ..
-FEDERATED_FRONTEND_PORT="$MR_FRONTEND_PORT" FEDERATED_BFF_PORT="$MR_BFF_PORT" make dev-start-federated INSECURE_SKIP_VERIFY=true
+HOST=0.0.0.0 FEDERATED_FRONTEND_PORT="$MR_FRONTEND_PORT" FEDERATED_BFF_PORT="$MR_BFF_PORT" make dev-start-federated INSECURE_SKIP_VERIFY=true

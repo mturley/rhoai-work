@@ -2,7 +2,7 @@
   "folders": [
     { "path": ".", "name": "rhoai-work" },
     { "path": "opendatahub-io/odh-dashboard", "name": "odh-dashboard" },
-    { "path": "kubeflow/model-registry", "name": "model-registry" },
+    { "path": "kubeflow/hub", "name": "hub" },
     { "path": "opendatahub-io/mod-arch-library", "name": "mod-arch-library" },
     { "path": "opendatahub-io/model-registry-operator", "name": "model-registry-operator" },
     { "path": "kubeflow/notebooks", "name": "notebooks" }

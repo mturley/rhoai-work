@@ -7,7 +7,10 @@
       "mcp__puppeteer__puppeteer_screenshot",
       "mcp__puppeteer__puppeteer_get_text",
       "mcp__puppeteer__puppeteer_click",
-      "Bash(ls -d .claude/worktrees/:*)"
+      "Bash(ls -d .claude/worktrees/:*)",
+      "Bash(npx turbo:*)",
+      "Bash(ls /Users/mturley/git/rhoai-work/opendatahub-io/odh-dashboard/packages/model-training/.eslintrc*)",
+      "Bash(ls /Users/mturley/git/rhoai-work/opendatahub-io/odh-dashboard/packages/model-registry/jest.config*)"
     ]
   }
 }

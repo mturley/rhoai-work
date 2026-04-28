@@ -45,13 +45,14 @@ if [[ -z "$TITLE" && -n "${WORKTREE_TITLE:-}" ]]; then
   TITLE="$WORKTREE_TITLE"
 fi
 
-# Port range: use WORKTREE_PORTS env var, or default to 4010-4019 unless --default-ports
-if [[ "$USE_DEFAULT_PORTS" == true ]]; then
+# Port range: use WORKTREE_PORTS env var if set, otherwise use default ports
+if [[ "$USE_DEFAULT_PORTS" == true ]] || [[ -z "${WORKTREE_PORTS:-}" ]]; then
+  unset WORKTREE_PORTS
   BACKEND_PORT_LABEL="4000"
   FRONTEND_PORT_LABEL="4010"
   MR_PORT_LABEL="9100"
 else
-  export WORKTREE_PORTS="${WORKTREE_PORTS:-4010-4019}"
+  export WORKTREE_PORTS
   RANGE_START="${WORKTREE_PORTS%%-*}"
   BACKEND_PORT_LABEL="$RANGE_START"
   FRONTEND_PORT_LABEL="$((RANGE_START + 1))"

@@ -5,7 +5,7 @@ Multi-repo coordination workspace for working across the RHOAI Dashboard team's 
 ## Repos
 
 - **[odh-dashboard](https://github.com/opendatahub-io/odh-dashboard)** — Frontend dashboard monorepo (React/TypeScript)
-- **[model-registry](https://github.com/kubeflow/model-registry)** — Upstream model registry backend (Go + Python)
+- **[hub](https://github.com/kubeflow/hub)** — Upstream Kubeflow Hub backend (Go + Python)
 - **[notebooks](https://github.com/kubeflow/notebooks)** — Upstream Kubeflow Notebooks (workspaces UI + backend, active trunk: `notebooks-v2`)
 - **[mod-arch-library](https://github.com/opendatahub-io/mod-arch-library)** — Shared modular architecture library (React/TypeScript)
 - **[model-registry-operator](https://github.com/opendatahub-io/model-registry-operator)** — Model registry Kubernetes operator (Go)
@@ -16,7 +16,7 @@ Clone the repos into their org-namespaced directories (these are gitignored):
 
 ```bash
 git clone git@github.com:opendatahub-io/odh-dashboard.git opendatahub-io/odh-dashboard
-git clone git@github.com:kubeflow/model-registry.git kubeflow/model-registry
+git clone git@github.com:kubeflow/hub.git kubeflow/hub
 git clone git@github.com:kubeflow/notebooks.git kubeflow/notebooks
 git clone git@github.com:opendatahub-io/mod-arch-library.git opendatahub-io/mod-arch-library
 git clone git@github.com:opendatahub-io/model-registry-operator.git opendatahub-io/model-registry-operator

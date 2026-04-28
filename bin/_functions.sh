@@ -4,7 +4,7 @@
 
 RHOAI_WORK=~/git/rhoai-work
 ODH_DASHBOARD=$RHOAI_WORK/opendatahub-io/odh-dashboard
-KFMR_DIR=$RHOAI_WORK/kubeflow/model-registry
+KFMR_DIR=$RHOAI_WORK/kubeflow/hub
 
 cdwork()          { cd "$RHOAI_WORK"; }
 
@@ -12,7 +12,7 @@ odh()             { if git remote -v 2>/dev/null | grep -q "odh-dashboard"; then
 odh-mr()          { odh && cd packages/model-registry; }
 odh-mr-upstream() { odh && cd packages/model-registry/upstream; }
 
-kfmr()            { if git remote -v 2>/dev/null | grep -q "model-registry"; then cd "$(git rev-parse --show-toplevel)"; else cd "$KFMR_DIR"; fi; }
+kfmr()            { if git remote -v 2>/dev/null | grep -q "kubeflow/hub"; then cd "$(git rev-parse --show-toplevel)"; else cd "$KFMR_DIR"; fi; }
 kfmr-ui()         { kfmr && cd clients/ui; }
 kfmr-frontend()   { kfmr-ui && cd frontend; }
 kfmr-bff()        { kfmr-ui && cd bff; }

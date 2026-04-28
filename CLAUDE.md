@@ -1,6 +1,6 @@
 # RHOAI Dashboard Workspace
 
-Multi-repo coordination workspace for the RHOAI Dashboard team's AI Hub (model registry/catalog) work.
+Multi-repo coordination workspace for the RHOAI Dashboard team.
 
 ## Workspace Structure
 
@@ -9,7 +9,7 @@ This workspace contains four git repositories organized by GitHub org:
 | Path | Repo | Description |
 |------|------|-------------|
 | `opendatahub-io/odh-dashboard/` | [opendatahub-io/odh-dashboard](https://github.com/opendatahub-io/odh-dashboard) | ODH Dashboard monorepo (React/TypeScript frontend) |
-| `kubeflow/model-registry/` | [kubeflow/model-registry](https://github.com/kubeflow/model-registry) | Upstream Kubeflow Model Registry (Go backend + UI under clients/ui) |
+| `kubeflow/hub/` | [kubeflow/hub](https://github.com/kubeflow/hub) | Upstream Kubeflow Hub (Go backend + UI under clients/ui) |
 | `kubeflow/notebooks/` | [kubeflow/notebooks](https://github.com/kubeflow/notebooks) | Upstream Kubeflow Notebooks (workspaces UI + backend) |
 | `opendatahub-io/mod-arch-library/` | [opendatahub-io/mod-arch-library](https://github.com/opendatahub-io/mod-arch-library) | Modular Architecture shared library (React/TypeScript) |
 
@@ -39,7 +39,7 @@ mod-arch-library (mod-arch-core, mod-arch-shared, mod-arch-kubeflow)
         |
         | npm packages consumed by
         v
-model-registry/clients/ui  (upstream frontend + BFF)
+hub/clients/ui  (upstream frontend + BFF)
 notebooks/workspaces/       (upstream frontend + backend + controller)
         |
         | synced via update-subtree to
@@ -49,13 +49,13 @@ odh-dashboard/packages/notebooks/upstream        (+ ODH extensions)
         |
         | frontend consumes REST API from
         v
-model-registry  (Go backend, OpenAPI spec)
+hub  (Go backend, OpenAPI spec)
 notebooks       (workspaces backend)
 ```
 
-- **mod-arch-library** provides shared React components, hooks, context providers, and theming consumed by the model-registry UI, notebooks UI, and other odh-dashboard packages.
+- **mod-arch-library** provides shared React components, hooks, context providers, and theming consumed by the hub UI, notebooks UI, and other odh-dashboard packages.
 - **odh-dashboard** is a monorepo. The `packages/model-registry/` package contains the Model Registry UI. `packages/model-registry/upstream/` mirrors the upstream kubeflow repo structure. `packages/model-registry/src/` has downstream-only code. Similarly, `packages/notebooks/upstream/` mirrors upstream from `kubeflow/notebooks`.
-- **model-registry** (kubeflow) is the upstream repo containing the Go REST API backend, the OpenAPI spec, and the UI code under `clients/ui/` (frontend + BFF). The `clients/ui/` code is regularly synced to `odh-dashboard/packages/model-registry/upstream/` using the `update-subtree` script in odh-dashboard (orchestrated via the `/model-registry-upstream-sync` skill in that repo). The odh-dashboard copy layers on ODH-specific extensions.
+- **hub** (kubeflow) is the upstream repo containing the Go REST API backend, the OpenAPI spec, and the UI code under `clients/ui/` (frontend + BFF). The `clients/ui/` code is regularly synced to `odh-dashboard/packages/model-registry/upstream/` using the `update-subtree` script in odh-dashboard (orchestrated via the `/model-registry-upstream-sync` skill in that repo). The odh-dashboard copy layers on ODH-specific extensions.
 - **notebooks** (kubeflow) is the upstream repo for the Kubeflow Notebooks v2 workspaces feature. The repo's `main` branch is sparse; the active trunk is `notebooks-v2`. The `workspaces/` directory (frontend, backend, controller) is synced to `odh-dashboard/packages/notebooks/upstream/` via `update-subtree` from the `notebooks-v2` branch. Always create new branches from `upstream/notebooks-v2`. The odh-dashboard copy layers on ODH-specific extensions.
 
 ## Reading Repo-Specific Instructions
@@ -63,7 +63,7 @@ notebooks       (workspaces backend)
 **IMPORTANT:** Before doing substantive work in a specific repo, read its instructions:
 
 - **odh-dashboard**: Read `opendatahub-io/odh-dashboard/AGENTS.md` (CLAUDE.md points to it). For specific tasks, check the agent-rules files under `opendatahub-io/odh-dashboard/docs/agent-rules/`.
-- **model-registry**: Read `kubeflow/model-registry/CLAUDE.md`. Key constraint: **never mention RHOAIENG Jira issues** in content pushed to this upstream repo.
+- **hub**: Read `kubeflow/hub/CLAUDE.md`. Key constraint: **never mention RHOAIENG Jira issues** in content pushed to this upstream repo.
 - **notebooks**: Read `kubeflow/notebooks/CLAUDE.md` (if it exists). Key constraint: **never mention RHOAIENG Jira issues** in content pushed to this upstream repo. Uses `upstream` remote for canonical repo, `origin` for fork. The `main` branch is sparse — the active trunk is `notebooks-v2`. Always create new branches from `upstream/notebooks-v2` and target PRs to the `notebooks-v2` branch.
 - **mod-arch-library**: Read `opendatahub-io/mod-arch-library/AGENTS.md` (CLAUDE.md points to it). Uses Conventional Commits.
 
@@ -72,7 +72,7 @@ notebooks       (workspaces backend)
 These are extracted from the individual repo instructions for quick reference. Always read the full repo instructions for complete context.
 
 - **odh-dashboard**: Node >= 22, npm >= 10, Go >= 1.24 (for BFFs). Uses Turbo monorepo, PatternFly v6, Webpack Module Federation. Run `npm run lint`, `npm run test`, `npm run type-check` from repo root.
-- **model-registry**: Upstream open-source repo (kubeflow/model-registry). Uses `upstream` remote for canonical repo, `origin` for fork. **Never reference RHOAIENG Jira issues** in any content pushed upstream.
+- **hub**: Upstream open-source repo (kubeflow/hub). Uses `upstream` remote for canonical repo, `origin` for fork. **Never reference RHOAIENG Jira issues** in any content pushed upstream.
 - **notebooks**: Upstream open-source repo (kubeflow/notebooks). Uses `upstream` remote for canonical repo, `origin` for fork. The `main` branch is sparse — the active trunk is `notebooks-v2`. Always branch from `upstream/notebooks-v2` and target PRs there. **Never reference RHOAIENG Jira issues** in any content pushed upstream.
 - **mod-arch-library**: Node >= 20, npm >= 10. Uses npm workspaces, Conventional Commits (`feat:`, `fix:`, `docs:`, etc.). No `.sort()` — use `.toSorted()`. Run `npm run build`, `npm run test`, `npm run lint` from repo root.
 
@@ -82,14 +82,14 @@ Many Jira issues in the RHOAIENG project span multiple repos. When working on su
 
 1. **Read the Jira issue** using the Jira MCP tools to understand full scope.
 2. **Identify which repos are affected** — e.g., an API change may require:
-   - Backend changes in `kubeflow/model-registry/` or `kubeflow/notebooks/` (Go)
+   - Backend changes in `kubeflow/hub/` or `kubeflow/notebooks/` (Go)
    - Frontend changes in `opendatahub-io/odh-dashboard/packages/model-registry/upstream/frontend/` or `packages/notebooks/upstream/workspaces/frontend/` (TypeScript/React)
    - Shared component changes in `opendatahub-io/mod-arch-library/` (TypeScript/React)
 3. **Plan the work order**: Typically bottom-up:
-   - API/backend changes first (model-registry, notebooks)
+   - API/backend changes first (hub, notebooks)
    - Shared library changes if needed (mod-arch-library)
    - Frontend integration last (odh-dashboard)
-4. **Respect upstream boundaries**: Changes to `model-registry` or `notebooks` go through kubeflow upstream PRs. Do not reference internal Jira issues in those PRs.
+4. **Respect upstream boundaries**: Changes to `hub` or `notebooks` go through kubeflow upstream PRs. Do not reference internal Jira issues in those PRs.
 
 ## Context Files
 
@@ -105,7 +105,7 @@ Read the relevant context file before using the corresponding MCP tools.
 ## Common Cross-Repo Workflows
 
 ### Checking API contract alignment
-- Compare the OpenAPI spec in `kubeflow/model-registry/api/` with the TypeScript types in `opendatahub-io/odh-dashboard/packages/model-registry/upstream/frontend/src/`
+- Compare the OpenAPI spec in `kubeflow/hub/api/` with the TypeScript types in `opendatahub-io/odh-dashboard/packages/model-registry/upstream/frontend/src/`
 
 ### Updating shared components
 - Make changes in `opendatahub-io/mod-arch-library/`
@@ -114,7 +114,7 @@ Read the relevant context file before using the corresponding MCP tools.
 
 ### File Links in VS Code
 
-When outputting markdown links to files (for clickable references in VS Code), use paths relative to the workspace root (`rhoai-work/`). Since repos are nested under org-name directories, file links must include the repo path prefix (e.g. `kubeflow/model-registry/path/to/file.ts`, not just `path/to/file.ts`).
+When outputting markdown links to files (for clickable references in VS Code), use paths relative to the workspace root (`rhoai-work/`). Since repos are nested under org-name directories, file links must include the repo path prefix (e.g. `kubeflow/hub/path/to/file.ts`, not just `path/to/file.ts`).
 
 ### Navigating the model-registry UI code
 - Upstream UI code: `opendatahub-io/odh-dashboard/packages/model-registry/upstream/frontend/src/`

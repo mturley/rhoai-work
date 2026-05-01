@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$SCRIPT_DIR/_functions.sh"
+odh
+
+set -a
+source .env.local
+set +a
+
+oc login --server="$OC_URL" --web && oc whoami -t

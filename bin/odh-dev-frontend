@@ -8,6 +8,11 @@ if [[ -n "${WORKTREE_PORTS:-}" ]]; then
   export BACKEND_PORT="$RANGE_START"
 fi
 
+if [[ -n "${WORKTREE_TITLE:-}" ]]; then
+  echo "Using title $WORKTREE_TITLE"
+  export ODH_PRODUCT_NAME="$WORKTREE_TITLE"
+fi
+
 odh
 cd frontend
 npm run start:dev

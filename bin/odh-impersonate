@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$SCRIPT_DIR/_functions.sh"
+odh
+
+set -a
+source .env.local
+set +a
+
+if ! grep -q '^DEV_IMPERSONATE_USER=' .env.local || ! grep -q '^DEV_IMPERSONATE_TOKEN=' .env.local; then
+  echo "No uncommented DEV_IMPERSONATE_USER and/or DEV_IMPERSONATE_TOKEN found in .env.local. Nothing was changed." >&2
+  exit 1
+fi
+
+echo "Logging in to $OC_URL via web browser..."
+if ! oc login --server="$OC_URL" --web; then
+  echo "Login failed." >&2
+  exit 1
+fi
+
+TOKEN=$(oc whoami -t)
+USER=$(oc whoami)
+if [ -z "$TOKEN" ]; then
+  echo "Failed to retrieve token." >&2
+  exit 1
+fi
+
+awk -v token="$TOKEN" -v user="$USER" '
+  { lines[NR] = $0 }
+  /^DEV_IMPERSONATE_USER=/ { lastUser = NR }
+  /^DEV_IMPERSONATE_TOKEN=/ { lastToken = NR }
+  END {
+    for (i = 1; i <= NR; i++) {
+      if (i == lastUser) print "DEV_IMPERSONATE_USER=" user
+      else if (i == lastToken) print "DEV_IMPERSONATE_TOKEN=" token
+      else print lines[i]
+    }
+  }
+' .env.local > .env.local.tmp && mv .env.local.tmp .env.local
+echo ">>> Switching back to your original oc session..."
+"$SCRIPT_DIR/odh-login"
+echo
+echo "------------------------------------------------------------------------------"
+echo "Replaced DEV_IMPERSONATE_USER and DEV_IMPERSONATE_TOKEN in .env.local using token for $USER."
+echo "Restored shell oc login to $(oc whoami)."

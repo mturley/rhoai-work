@@ -68,18 +68,37 @@ else
   MPROCS_ARGS=()
   [[ -n "$TITLE" ]] && MPROCS_ARGS+=(--proc-list-title "$TITLE")
 
+  # Detect if we're in a git worktree (not the main worktree)
+  IN_WORKTREE=false
+  if git rev-parse --is-inside-work-tree &>/dev/null; then
+    WT_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)"
+    if [ -n "$WT_ROOT" ] && [ -f "$WT_ROOT/.git" ]; then
+      IN_WORKTREE=true
+    fi
+  fi
+
   if [[ "$USE_SHELL" == true ]]; then
     SHELL_LABEL="[$(basename "$SHELL")]"
     SHELL_CMD="$SHELL"
     if [ -n "${MPROCS_MOTD:-}" ] && [ -x "$MPROCS_MOTD" ]; then
       SHELL_CMD="$MPROCS_MOTD && exec $SHELL"
     fi
-    MPROCS_ARGS+=(--names "$SHELL_LABEL,frontend:${FRONTEND_PORT_LABEL},backend:${BACKEND_PORT_LABEL},mr-upstream:${MR_PORT_LABEL}")
-    mprocs "${MPROCS_ARGS[@]}" \
-      "$SHELL_CMD" \
-      "$SCRIPT_DIR/odh-dev-frontend" \
-      "$SCRIPT_DIR/odh-dev-backend" \
-      "$SCRIPT_DIR/odh-dev-mr-upstream-federated"
+    if [[ "$IN_WORKTREE" == true ]]; then
+      MPROCS_ARGS+=(--names "[worktree],$SHELL_LABEL,frontend:${FRONTEND_PORT_LABEL},backend:${BACKEND_PORT_LABEL},mr-upstream:${MR_PORT_LABEL}")
+      mprocs "${MPROCS_ARGS[@]}" \
+        "worktree" \
+        "$SHELL_CMD" \
+        "$SCRIPT_DIR/odh-dev-frontend" \
+        "$SCRIPT_DIR/odh-dev-backend" \
+        "$SCRIPT_DIR/odh-dev-mr-upstream-federated"
+    else
+      MPROCS_ARGS+=(--names "$SHELL_LABEL,frontend:${FRONTEND_PORT_LABEL},backend:${BACKEND_PORT_LABEL},mr-upstream:${MR_PORT_LABEL}")
+      mprocs "${MPROCS_ARGS[@]}" \
+        "$SHELL_CMD" \
+        "$SCRIPT_DIR/odh-dev-frontend" \
+        "$SCRIPT_DIR/odh-dev-backend" \
+        "$SCRIPT_DIR/odh-dev-mr-upstream-federated"
+    fi
   else
     MPROCS_ARGS+=(--names "frontend:${FRONTEND_PORT_LABEL},backend:${BACKEND_PORT_LABEL},mr-upstream:${MR_PORT_LABEL}")
     mprocs "${MPROCS_ARGS[@]}" \

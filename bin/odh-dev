@@ -89,7 +89,7 @@ else
         backend:*)   dev_cmd="$SCRIPT_DIR/odh-dev-backend" ;;
         mr-upstream:*) dev_cmd="$SCRIPT_DIR/odh-dev-mr-upstream-federated" ;;
       esac
-      mprocs --server="$WORKTREE_SHELL_MPROCS_SOCK" --ctl="{c: add-proc, cmd: \"WORKTREE_PORTS='${WORKTREE_PORTS:-}' $dev_cmd\", name: \"$dev_name\"}"
+      mprocs --server="$WORKTREE_SHELL_MPROCS_SOCK" --ctl="{c: add-proc, cmd: \"cd '$PWD' && WORKTREE_PORTS='${WORKTREE_PORTS:-}' $dev_cmd\", name: \"$dev_name\"}"
       CURRENT="$(cat "$SHELL_MPROCS_COUNT")"
       echo "$((CURRENT + 1))" > "$SHELL_MPROCS_COUNT"
     done

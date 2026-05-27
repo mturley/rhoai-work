@@ -96,9 +96,14 @@ else
     echo "Added frontend, backend, and mr-upstream panes to worktree mprocs session."
   elif [[ "$USE_SHELL" == true ]]; then
     SHELL_LABEL="[$(basename "$SHELL")]"
-    SHELL_CMD="$SHELL"
+    TITLE_PROXY="$(command -v mprocs-title-proxy 2>/dev/null || true)"
+    if [ -n "$TITLE_PROXY" ]; then
+      SHELL_CMD="exec '$TITLE_PROXY' $SHELL"
+    else
+      SHELL_CMD="exec $SHELL"
+    fi
     if [ -n "${MPROCS_MOTD:-}" ] && [ -x "$MPROCS_MOTD" ]; then
-      SHELL_CMD="$MPROCS_MOTD && exec $SHELL"
+      SHELL_CMD="$MPROCS_MOTD && $SHELL_CMD"
     fi
     if [[ "$IN_WORKTREE" == true ]]; then
       MPROCS_ARGS+=(--names "[worktree],$SHELL_LABEL,frontend:${FRONTEND_PORT_LABEL},backend:${BACKEND_PORT_LABEL},mr-upstream:${MR_PORT_LABEL}")

@@ -4,7 +4,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # Resolve mprocs-motd.sh from the work-scripts repo (via worktree on PATH)
 WORKTREE_BIN="$(command -v worktree 2>/dev/null || true)"
 if [ -n "$WORKTREE_BIN" ]; then
-  MPROCS_MOTD="$(cd "$(dirname "$(readlink -f "$WORKTREE_BIN")")/../lib" && pwd)/mprocs-motd.sh"
+  MPROCS_MOTD="$(cd "$(dirname "$(readlink -f "$WORKTREE_BIN")")/../../lib" && pwd)/mprocs-motd.sh"
 fi
 
 USE_ITERM=false
@@ -77,7 +77,24 @@ else
     fi
   fi
 
-  if [[ "$USE_SHELL" == true ]]; then
+  # If inside a worktree shell-command mprocs, add dev panes to it
+  if [[ -n "${WORKTREE_SHELL_MPROCS_SOCK:-}" ]]; then
+    SHELL_MPROCS_COUNT="/tmp/worktree-shell-mprocs-${WORKTREE_SHELL_MPROCS_PID:-unknown}-count"
+    if [ ! -f "$SHELL_MPROCS_COUNT" ]; then
+      echo 2 > "$SHELL_MPROCS_COUNT"
+    fi
+    for dev_name in "frontend:${FRONTEND_PORT_LABEL}" "backend:${BACKEND_PORT_LABEL}" "mr-upstream:${MR_PORT_LABEL}"; do
+      case "$dev_name" in
+        frontend:*)  dev_cmd="$SCRIPT_DIR/odh-dev-frontend" ;;
+        backend:*)   dev_cmd="$SCRIPT_DIR/odh-dev-backend" ;;
+        mr-upstream:*) dev_cmd="$SCRIPT_DIR/odh-dev-mr-upstream-federated" ;;
+      esac
+      mprocs --server="$WORKTREE_SHELL_MPROCS_SOCK" --ctl="{c: add-proc, cmd: \"WORKTREE_PORTS='${WORKTREE_PORTS:-}' $dev_cmd\", name: \"$dev_name\"}"
+      CURRENT="$(cat "$SHELL_MPROCS_COUNT")"
+      echo "$((CURRENT + 1))" > "$SHELL_MPROCS_COUNT"
+    done
+    echo "Added frontend, backend, and mr-upstream panes to worktree mprocs session."
+  elif [[ "$USE_SHELL" == true ]]; then
     SHELL_LABEL="[$(basename "$SHELL")]"
     SHELL_CMD="$SHELL"
     if [ -n "${MPROCS_MOTD:-}" ] && [ -x "$MPROCS_MOTD" ]; then

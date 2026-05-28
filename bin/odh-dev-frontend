@@ -15,4 +15,4 @@ fi
 
 odh
 cd frontend
-npm run start:dev
+npm run start:dev -- --open

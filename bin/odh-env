@@ -173,8 +173,9 @@ print_summary() {
   local idx=$1 sel_user=$2
   local cluster_type="${C_TYPES[$idx]}"
 
+  local env_display="${ENV_FILE/#$HOME/~}"
   echo ""
-  echo "Switched to: ${C_NAMES[$idx]} (${C_IDS[$idx]}, $cluster_type)"
+  echo "Switched to: ${C_NAMES[$idx]} (${C_IDS[$idx]}, $cluster_type) in $env_display"
   if [[ -n "${C_ENVS[$idx]}" ]]; then
     while IFS= read -r env_line; do
       [[ -z "$env_line" ]] && continue

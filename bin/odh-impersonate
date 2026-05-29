@@ -3,11 +3,13 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/_functions.sh"
 odh
 
+ENV_FILE="$(pwd)/.env.local"
+
 set -a
-source .env.local
+source "$ENV_FILE"
 set +a
 
-if ! grep -q '^DEV_IMPERSONATE_USER=' .env.local || ! grep -q '^DEV_IMPERSONATE_TOKEN=' .env.local; then
+if ! grep -q '^DEV_IMPERSONATE_USER=' "$ENV_FILE" || ! grep -q '^DEV_IMPERSONATE_TOKEN=' "$ENV_FILE"; then
   echo "No uncommented DEV_IMPERSONATE_USER and/or DEV_IMPERSONATE_TOKEN found in .env.local. Nothing was changed." >&2
   exit 1
 fi
@@ -36,12 +38,11 @@ awk -v token="$TOKEN" -v user="$USER" '
       else print lines[i]
     }
   }
-' .env.local > .env.local.tmp && mv .env.local.tmp .env.local
+' "$ENV_FILE" > "$ENV_FILE.tmp" && mv "$ENV_FILE.tmp" "$ENV_FILE"
 echo ">>> Switching back to your original oc session..."
 "$SCRIPT_DIR/odh-login"
 echo
 echo "------------------------------------------------------------------------------"
-ENV_PATH="$(pwd)/.env.local"
-ENV_DISPLAY="${ENV_PATH/#$HOME/\~}"
+ENV_DISPLAY="${ENV_FILE/#$HOME/~}"
 echo "Replaced DEV_IMPERSONATE_USER and DEV_IMPERSONATE_TOKEN in $ENV_DISPLAY using token for $USER."
 echo "Restored shell oc login to $(oc whoami)."

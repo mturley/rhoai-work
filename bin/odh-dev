@@ -9,6 +9,7 @@ fi
 
 USE_ITERM=false
 USE_DEFAULT_PORTS=false
+USE_DEFAULT_TITLE=false
 USE_SHELL=true
 TITLE=""
 
@@ -34,6 +35,10 @@ while [[ $# -gt 0 ]]; do
       USE_DEFAULT_PORTS=true
       shift
       ;;
+    --default-title)
+      USE_DEFAULT_TITLE=true
+      shift
+      ;;
     *)
       shift
       ;;
@@ -41,7 +46,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 # Use WORKTREE_TITLE as fallback title if --title was not passed
-if [[ -z "$TITLE" && -n "${WORKTREE_TITLE:-}" ]]; then
+if [[ "$USE_DEFAULT_TITLE" != true && -z "$TITLE" && -n "${WORKTREE_TITLE:-}" ]]; then
   TITLE="$WORKTREE_TITLE"
 fi
 

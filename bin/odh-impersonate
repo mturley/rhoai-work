@@ -41,5 +41,7 @@ echo ">>> Switching back to your original oc session..."
 "$SCRIPT_DIR/odh-login"
 echo
 echo "------------------------------------------------------------------------------"
-echo "Replaced DEV_IMPERSONATE_USER and DEV_IMPERSONATE_TOKEN in .env.local using token for $USER."
+ENV_PATH="$(pwd)/.env.local"
+ENV_DISPLAY="${ENV_PATH/#$HOME/\~}"
+echo "Replaced DEV_IMPERSONATE_USER and DEV_IMPERSONATE_TOKEN in $ENV_DISPLAY using token for $USER."
 echo "Restored shell oc login to $(oc whoami)."

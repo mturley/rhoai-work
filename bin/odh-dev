@@ -94,6 +94,13 @@ else
       echo "$((CURRENT + 1))" > "$SHELL_MPROCS_COUNT"
     done
     echo "Added frontend, backend, and mr-upstream panes to worktree mprocs session."
+  elif [[ -n "${CMUX_SOCKET_PATH:-}" ]]; then
+    # Inside cmux: skip worktree/shell panes, cmux provides its own terminals
+    MPROCS_ARGS+=(--names "frontend:${FRONTEND_PORT_LABEL},backend:${BACKEND_PORT_LABEL},mr-upstream:${MR_PORT_LABEL}")
+    mprocs "${MPROCS_ARGS[@]}" \
+      "$SCRIPT_DIR/odh-dev-frontend" \
+      "$SCRIPT_DIR/odh-dev-backend" \
+      "$SCRIPT_DIR/odh-dev-mr-upstream-federated"
   elif [[ "$USE_SHELL" == true ]]; then
     SHELL_LABEL="[$(basename "$SHELL")]"
     SHELL_CMD="$SHELL"

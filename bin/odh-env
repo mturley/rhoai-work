@@ -29,18 +29,25 @@ worktree_kubeconfig_path() {
 write_kubeconfig_line() {
   local tmpfile
   tmpfile=$(mktemp)
-  local wrote="no"
+  local last_impersonate_line=0 line_num=0
 
-  # Remove any existing KUBECONFIG line, then insert the new one before @active
+  # Find the last DEV_IMPERSONATE_ line (commented or not)
   while IFS= read -r line; do
-    [[ "$line" =~ ^KUBECONFIG= ]] && continue
-    if [[ "$wrote" == "no" && "$line" =~ ^#\ @active ]]; then
-      if [[ "$ISOLATE" == "yes" ]]; then
-        echo "KUBECONFIG=$(worktree_kubeconfig_path)" >> "$tmpfile"
-      fi
-      wrote="yes"
+    line_num=$((line_num + 1))
+    if [[ "$line" =~ DEV_IMPERSONATE_ ]]; then
+      last_impersonate_line=$line_num
     fi
+  done < "$ENV_FILE"
+
+  # Rewrite: strip existing KUBECONFIG line, insert new one after impersonate vars
+  line_num=0
+  while IFS= read -r line; do
+    line_num=$((line_num + 1))
+    [[ "$line" =~ ^KUBECONFIG= ]] && continue
     echo "$line" >> "$tmpfile"
+    if [[ $line_num -eq $last_impersonate_line && "$ISOLATE" == "yes" ]]; then
+      echo "KUBECONFIG=$(worktree_kubeconfig_path)" >> "$tmpfile"
+    fi
   done < "$ENV_FILE"
   mv "$tmpfile" "$ENV_FILE"
 }

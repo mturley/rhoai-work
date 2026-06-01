@@ -14,14 +14,17 @@ if ! grep -q '^DEV_IMPERSONATE_USER=' "$ENV_FILE" || ! grep -q '^DEV_IMPERSONATE
   exit 1
 fi
 
+TEMP_KUBECONFIG="$(mktemp)"
+trap 'rm -f "$TEMP_KUBECONFIG"' EXIT
+
 echo "Logging in to $OC_URL via web browser..."
-if ! oc login --server="$OC_URL" --web; then
+if ! KUBECONFIG="$TEMP_KUBECONFIG" oc login --server="$OC_URL" --web; then
   echo "Login failed." >&2
   exit 1
 fi
 
-TOKEN=$(oc whoami -t)
-USER=$(oc whoami)
+TOKEN=$(KUBECONFIG="$TEMP_KUBECONFIG" oc whoami -t)
+USER=$(KUBECONFIG="$TEMP_KUBECONFIG" oc whoami)
 if [ -z "$TOKEN" ]; then
   echo "Failed to retrieve token." >&2
   exit 1

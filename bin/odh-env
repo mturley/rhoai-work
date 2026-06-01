@@ -26,6 +26,25 @@ worktree_kubeconfig_path() {
   echo "$HOME/.kube/config-$wt_name"
 }
 
+write_kubeconfig_line() {
+  local tmpfile
+  tmpfile=$(mktemp)
+  local wrote="no"
+
+  # Remove any existing KUBECONFIG line, then insert the new one before @active
+  while IFS= read -r line; do
+    [[ "$line" =~ ^KUBECONFIG= ]] && continue
+    if [[ "$wrote" == "no" && "$line" =~ ^#\ @active ]]; then
+      if [[ "$ISOLATE" == "yes" ]]; then
+        echo "KUBECONFIG=$(worktree_kubeconfig_path)" >> "$tmpfile"
+      fi
+      wrote="yes"
+    fi
+    echo "$line" >> "$tmpfile"
+  done < "$ENV_FILE"
+  mv "$tmpfile" "$ENV_FILE"
+}
+
 # Run a command, retrying on failure with a prompt to let the user fix things (e.g. VPN)
 retry_loop() {
   local description=$1
@@ -167,9 +186,6 @@ write_active_block() {
   active_block+="ODH_APP=$(app_for_type "$cluster_type")"$'\n'
   active_block+="OC_USER=$sel_user"$'\n'
   [[ -n "$sel_pass" ]] && active_block+="OC_PASSWORD=$sel_pass"$'\n'
-  if [[ "$ISOLATE" == "yes" ]]; then
-    active_block+="KUBECONFIG=$(worktree_kubeconfig_path)"$'\n'
-  fi
   active_block+="# @endactive"
 
   local tmpfile
@@ -276,6 +292,7 @@ switch_cluster() {
 
   select_user "$idx" "$target_user"
   write_active_block "$idx" "$SEL_USER" "$SEL_PASS"
+  write_kubeconfig_line
   print_summary "$idx" "$SEL_USER"
 }
 
@@ -415,6 +432,7 @@ add_cluster() {
 
   # We already know the user/pass — write active block directly
   write_active_block "$new_idx" "$new_user" "$new_pass"
+  write_kubeconfig_line
   print_summary "$new_idx" "$new_user"
 
   # Already logged in from discovery step, just verify

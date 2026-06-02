@@ -65,10 +65,19 @@ else
   echo "Dashboard: http://localhost:${FRONTEND_PORT_LABEL}"
 fi
 
+# --- Dev processes (comment out lines here to skip them) ---
+DEV_NAMES=()
+DEV_CMDS=()
+DEV_NAMES+=("frontend:${FRONTEND_PORT_LABEL}");  DEV_CMDS+=("$SCRIPT_DIR/odh-dev-frontend")
+DEV_NAMES+=("backend:${BACKEND_PORT_LABEL}");    DEV_CMDS+=("$SCRIPT_DIR/odh-dev-backend")
+DEV_NAMES+=("mr-upstream:${MR_PORT_LABEL}");     DEV_CMDS+=("$SCRIPT_DIR/odh-dev-mr-upstream-federated")
+
+DEV_NAMES_CSV="$(IFS=,; echo "${DEV_NAMES[*]}")"
+
 if [[ "$USE_ITERM" == true ]]; then
-  iterm-new split-v "odh-dev-frontend"
-  iterm-new split-v "odh-dev-backend"
-  iterm-new split-v "odh-dev-mr-upstream-federated"
+  for cmd in "${DEV_CMDS[@]}"; do
+    iterm-new split-v "$(basename "$cmd")"
+  done
 else
   MPROCS_ARGS=()
   [[ -n "$TITLE" ]] && MPROCS_ARGS+=(--proc-list-title "$TITLE")
@@ -88,24 +97,16 @@ else
     if [ ! -f "$SHELL_MPROCS_COUNT" ]; then
       echo 2 > "$SHELL_MPROCS_COUNT"
     fi
-    for dev_name in "frontend:${FRONTEND_PORT_LABEL}" "backend:${BACKEND_PORT_LABEL}" "mr-upstream:${MR_PORT_LABEL}"; do
-      case "$dev_name" in
-        frontend:*)  dev_cmd="$SCRIPT_DIR/odh-dev-frontend" ;;
-        backend:*)   dev_cmd="$SCRIPT_DIR/odh-dev-backend" ;;
-        mr-upstream:*) dev_cmd="$SCRIPT_DIR/odh-dev-mr-upstream-federated" ;;
-      esac
-      mprocs --server="$WORKTREE_SHELL_MPROCS_SOCK" --ctl="{c: add-proc, cmd: \"cd '$PWD' && WORKTREE_PORTS='${WORKTREE_PORTS:-}' $dev_cmd\", name: \"$dev_name\"}"
+    for i in "${!DEV_NAMES[@]}"; do
+      mprocs --server="$WORKTREE_SHELL_MPROCS_SOCK" --ctl="{c: add-proc, cmd: \"cd '$PWD' && WORKTREE_PORTS='${WORKTREE_PORTS:-}' ${DEV_CMDS[$i]}\", name: \"${DEV_NAMES[$i]}\"}"
       CURRENT="$(cat "$SHELL_MPROCS_COUNT")"
       echo "$((CURRENT + 1))" > "$SHELL_MPROCS_COUNT"
     done
-    echo "Added frontend, backend, and mr-upstream panes to worktree mprocs session."
+    echo "Added ${#DEV_NAMES[@]} dev panes to worktree mprocs session."
   elif [[ -n "${CMUX_SOCKET_PATH:-}" ]]; then
     # Inside cmux: skip worktree/shell panes, cmux provides its own terminals
-    MPROCS_ARGS+=(--names "frontend:${FRONTEND_PORT_LABEL},backend:${BACKEND_PORT_LABEL},mr-upstream:${MR_PORT_LABEL}")
-    mprocs "${MPROCS_ARGS[@]}" \
-      "$SCRIPT_DIR/odh-dev-frontend" \
-      "$SCRIPT_DIR/odh-dev-backend" \
-      "$SCRIPT_DIR/odh-dev-mr-upstream-federated"
+    MPROCS_ARGS+=(--names "$DEV_NAMES_CSV")
+    mprocs "${MPROCS_ARGS[@]}" "${DEV_CMDS[@]}"
   elif [[ "$USE_SHELL" == true ]]; then
     SHELL_LABEL="[$(basename "$SHELL")]"
     SHELL_CMD="$SHELL"
@@ -113,26 +114,14 @@ else
       SHELL_CMD="$MPROCS_MOTD && exec $SHELL"
     fi
     if [[ "$IN_WORKTREE" == true ]]; then
-      MPROCS_ARGS+=(--names "[worktree],$SHELL_LABEL,frontend:${FRONTEND_PORT_LABEL},backend:${BACKEND_PORT_LABEL},mr-upstream:${MR_PORT_LABEL}")
-      mprocs "${MPROCS_ARGS[@]}" \
-        "worktree" \
-        "$SHELL_CMD" \
-        "$SCRIPT_DIR/odh-dev-frontend" \
-        "$SCRIPT_DIR/odh-dev-backend" \
-        "$SCRIPT_DIR/odh-dev-mr-upstream-federated"
+      MPROCS_ARGS+=(--names "[worktree],$SHELL_LABEL,$DEV_NAMES_CSV")
+      mprocs "${MPROCS_ARGS[@]}" "worktree" "$SHELL_CMD" "${DEV_CMDS[@]}"
     else
-      MPROCS_ARGS+=(--names "$SHELL_LABEL,frontend:${FRONTEND_PORT_LABEL},backend:${BACKEND_PORT_LABEL},mr-upstream:${MR_PORT_LABEL}")
-      mprocs "${MPROCS_ARGS[@]}" \
-        "$SHELL_CMD" \
-        "$SCRIPT_DIR/odh-dev-frontend" \
-        "$SCRIPT_DIR/odh-dev-backend" \
-        "$SCRIPT_DIR/odh-dev-mr-upstream-federated"
+      MPROCS_ARGS+=(--names "$SHELL_LABEL,$DEV_NAMES_CSV")
+      mprocs "${MPROCS_ARGS[@]}" "$SHELL_CMD" "${DEV_CMDS[@]}"
     fi
   else
-    MPROCS_ARGS+=(--names "frontend:${FRONTEND_PORT_LABEL},backend:${BACKEND_PORT_LABEL},mr-upstream:${MR_PORT_LABEL}")
-    mprocs "${MPROCS_ARGS[@]}" \
-      "$SCRIPT_DIR/odh-dev-frontend" \
-      "$SCRIPT_DIR/odh-dev-backend" \
-      "$SCRIPT_DIR/odh-dev-mr-upstream-federated"
+    MPROCS_ARGS+=(--names "$DEV_NAMES_CSV")
+    mprocs "${MPROCS_ARGS[@]}" "${DEV_CMDS[@]}"
   fi
 fi

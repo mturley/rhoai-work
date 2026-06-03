@@ -70,7 +70,7 @@ DEV_NAMES=()
 DEV_CMDS=()
 DEV_NAMES+=("frontend:${FRONTEND_PORT_LABEL}");  DEV_CMDS+=("$SCRIPT_DIR/odh-dev-frontend")
 DEV_NAMES+=("backend:${BACKEND_PORT_LABEL}");    DEV_CMDS+=("$SCRIPT_DIR/odh-dev-backend")
-DEV_NAMES+=("mr-upstream:${MR_PORT_LABEL}");     DEV_CMDS+=("$SCRIPT_DIR/odh-dev-mr-upstream-federated")
+# DEV_NAMES+=("mr-upstream:${MR_PORT_LABEL}");     DEV_CMDS+=("$SCRIPT_DIR/odh-dev-mr-upstream-federated")
 
 DEV_NAMES_CSV="$(IFS=,; echo "${DEV_NAMES[*]}")"
 

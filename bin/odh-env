@@ -43,10 +43,10 @@ write_kubeconfig_line() {
   line_num=0
   while IFS= read -r line; do
     line_num=$((line_num + 1))
-    [[ "$line" =~ ^KUBECONFIG= ]] && continue
+    [[ "$line" =~ ^(export )?KUBECONFIG= ]] && continue
     echo "$line" >> "$tmpfile"
     if [[ $line_num -eq $last_impersonate_line && "$ISOLATE" == "yes" ]]; then
-      echo "KUBECONFIG=$(worktree_kubeconfig_path)" >> "$tmpfile"
+      echo "export KUBECONFIG=$(worktree_kubeconfig_path)" >> "$tmpfile"
     fi
   done < "$ENV_FILE"
   mv "$tmpfile" "$ENV_FILE"
@@ -233,7 +233,6 @@ print_summary() {
   printf "  %-14s %s\n" "OC_USER:" "$sel_user"
   if [[ "$ISOLATE" == "yes" ]]; then
     printf "  %-14s %s\n" "KUBECONFIG:" "$(worktree_kubeconfig_path)"
-    echo "  Run 'source .env.local' to use this config in your shell."
   fi
 
   if [[ -n "${C_URLS[$idx]}" ]]; then
@@ -514,4 +513,7 @@ else
   fi
   echo ""
   echo "Modified: ${ENV_FILE/#$HOME/~}"
+  if [[ "$ISOLATE" == "yes" ]]; then
+    echo "Run 'source .env.local' to use this config in your shell."
+  fi
 fi

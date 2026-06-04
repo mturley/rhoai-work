@@ -43,10 +43,10 @@ write_kubeconfig_line() {
   line_num=0
   while IFS= read -r line; do
     line_num=$((line_num + 1))
-    [[ "$line" =~ ^(export )?KUBECONFIG= ]] && continue
+    [[ "$line" =~ ^(export[[:space:]]+)?KUBECONFIG= ]] && continue
     echo "$line" >> "$tmpfile"
     if [[ $line_num -eq $last_impersonate_line && "$ISOLATE" == "yes" ]]; then
-      echo "export KUBECONFIG=$(worktree_kubeconfig_path)" >> "$tmpfile"
+      echo "KUBECONFIG=$(worktree_kubeconfig_path)" >> "$tmpfile"
     fi
   done < "$ENV_FILE"
   mv "$tmpfile" "$ENV_FILE"
@@ -457,6 +457,8 @@ add_cluster() {
 # Main
 # ---------------------------------------------------------------------------
 
+INCOMING_KUBECONFIG="${KUBECONFIG:-}"
+
 DO_LOGIN="yes"
 ADD_CLUSTER="no"
 ISOLATE=""  # empty = auto-detect
@@ -514,6 +516,13 @@ else
   echo ""
   echo "Modified: ${ENV_FILE/#$HOME/~}"
   if [[ "$ISOLATE" == "yes" ]]; then
-    echo "Run 'source .env.local' to use this config in your shell."
+    expected_kc="$(worktree_kubeconfig_path)"
+    if [[ "$INCOMING_KUBECONFIG" == "$expected_kc" ]]; then
+      echo "KUBECONFIG already points to ${expected_kc/#$HOME/~} in this shell."
+      echo "oc commands in this worktree will use this cluster."
+    else
+      echo "To use this config in your shell, run:"
+      echo "  export KUBECONFIG=${expected_kc/#$HOME/~}"
+    fi
   fi
 fi

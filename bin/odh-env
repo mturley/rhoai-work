@@ -21,9 +21,10 @@ is_in_worktree() {
 }
 
 worktree_kubeconfig_path() {
-  local wt_name
+  local wt_name wt_repo
   wt_name="$(basename "$ODH_DIR")"
-  echo "$HOME/.kube/config-$wt_name"
+  wt_repo="$(basename "$(dirname "$ODH_DIR")")"
+  echo "$HOME/.kube/config-${wt_repo}-${wt_name}"
 }
 
 # Run a command, retrying on failure with a prompt to let the user fix things (e.g. VPN)

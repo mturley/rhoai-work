@@ -26,32 +26,6 @@ worktree_kubeconfig_path() {
   echo "$HOME/.kube/config-$wt_name"
 }
 
-write_kubeconfig_line() {
-  local tmpfile
-  tmpfile=$(mktemp)
-  local last_impersonate_line=0 line_num=0
-
-  # Find the last DEV_IMPERSONATE_ line (commented or not)
-  while IFS= read -r line; do
-    line_num=$((line_num + 1))
-    if [[ "$line" =~ DEV_IMPERSONATE_ ]]; then
-      last_impersonate_line=$line_num
-    fi
-  done < "$ENV_FILE"
-
-  # Rewrite: strip existing KUBECONFIG line, insert new one after impersonate vars
-  line_num=0
-  while IFS= read -r line; do
-    line_num=$((line_num + 1))
-    [[ "$line" =~ ^(export[[:space:]]+)?KUBECONFIG= ]] && continue
-    echo "$line" >> "$tmpfile"
-    if [[ $line_num -eq $last_impersonate_line && "$ISOLATE" == "yes" ]]; then
-      echo "KUBECONFIG=$(worktree_kubeconfig_path)" >> "$tmpfile"
-    fi
-  done < "$ENV_FILE"
-  mv "$tmpfile" "$ENV_FILE"
-}
-
 # Run a command, retrying on failure with a prompt to let the user fix things (e.g. VPN)
 retry_loop() {
   local description=$1
@@ -299,7 +273,7 @@ switch_cluster() {
 
   select_user "$idx" "$target_user"
   write_active_block "$idx" "$SEL_USER" "$SEL_PASS"
-  write_kubeconfig_line
+
   print_summary "$idx" "$SEL_USER"
 }
 
@@ -442,7 +416,7 @@ add_cluster() {
 
   # We already know the user/pass — write active block directly
   write_active_block "$new_idx" "$new_user" "$new_pass"
-  write_kubeconfig_line
+
   print_summary "$new_idx" "$new_user"
 
   # Already logged in from discovery step, just verify
@@ -456,8 +430,6 @@ add_cluster() {
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
-
-INCOMING_KUBECONFIG="${KUBECONFIG:-}"
 
 DO_LOGIN="yes"
 ADD_CLUSTER="no"
@@ -516,13 +488,6 @@ else
   echo ""
   echo "Modified: ${ENV_FILE/#$HOME/~}"
   if [[ "$ISOLATE" == "yes" ]]; then
-    expected_kc="$(worktree_kubeconfig_path)"
-    if [[ "$INCOMING_KUBECONFIG" == "$expected_kc" ]]; then
-      echo "KUBECONFIG already points to ${expected_kc/#$HOME/~} in this shell."
-      echo "oc commands in this worktree will use this cluster."
-    else
-      echo "To use this config in your shell, run:"
-      echo "  export KUBECONFIG=${expected_kc/#$HOME/~}"
-    fi
+    echo "KUBECONFIG: $(worktree_kubeconfig_path | sed "s|$HOME|~|")"
   fi
 fi

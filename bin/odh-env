@@ -126,6 +126,7 @@ parse_clusters() {
         u="${rest%% *}"
         if [[ "$rest" == *" "* ]]; then
           p="${rest#* }"
+          p="${p//\\#/#}"  # unescape \# from storage format
         else
           echo "error: cluster '$cur_id' has @user '$u' with no password" >&2
           exit 1
@@ -192,7 +193,7 @@ write_active_block() {
   active_block+="OC_PROJECT=$(project_for_type "$cluster_type")"$'\n'
   active_block+="ODH_APP=$(app_for_type "$cluster_type")"$'\n'
   active_block+="OC_USER=$sel_user"$'\n'
-  [[ -n "$sel_pass" ]] && active_block+="OC_PASSWORD=$sel_pass"$'\n'
+  [[ -n "$sel_pass" ]] && active_block+="OC_PASSWORD=${sel_pass//#/\\#}"$'\n'
   active_block+="# @endactive"
 
   local tmpfile
@@ -383,12 +384,15 @@ add_cluster() {
   local dash_url=""
   [[ -n "$dash_host" ]] && dash_url="https://$dash_host/"
 
+  # Escape # in passwords so they survive Make's `include` (which treats # as comment)
+  local escaped_pass="${new_pass//#/\\#}"
+
   # Build the cluster definition block
   local block=""
   block+="# @cluster id=$new_id name=\"$new_name\" type=$new_type"$'\n'
   [[ -n "$ocp_url" ]] && block+="# @url OCP $ocp_url"$'\n'
   [[ -n "$dash_url" ]] && block+="# @url $dash_label $dash_url"$'\n'
-  block+="# @user $new_user $new_pass"$'\n'
+  block+="# @user $new_user $escaped_pass"$'\n'
   block+="# @env OC_URL=$new_url"$'\n'
   block+="# @endcluster"
 

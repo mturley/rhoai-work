@@ -13,20 +13,6 @@ ENV_FILE="$ODH_DIR/.env.local"
 
 die() { echo "error: $*" >&2; exit 1; }
 
-# ---------------------------------------------------------------------------
-# Isolated KUBECONFIG support
-# ---------------------------------------------------------------------------
-is_in_worktree() {
-  [[ -f "$ODH_DIR/.git" ]]
-}
-
-worktree_kubeconfig_path() {
-  local wt_name wt_repo
-  wt_name="$(basename "$ODH_DIR")"
-  wt_repo="$(basename "$(dirname "$ODH_DIR")")"
-  echo "$HOME/.kube/config-${wt_repo}-${wt_name}"
-}
-
 # Run a command, retrying on failure with a prompt to let the user fix things (e.g. VPN)
 retry_loop() {
   local description=$1
@@ -206,8 +192,8 @@ print_summary() {
   printf "  %-14s %s\n" "OC_PROJECT:" "$(project_for_type "$cluster_type")"
   printf "  %-14s %s\n" "ODH_APP:" "$(app_for_type "$cluster_type")"
   printf "  %-14s %s\n" "OC_USER:" "$sel_user"
-  if [[ "$ISOLATE" == "yes" ]]; then
-    printf "  %-14s %s\n" "KUBECONFIG:" "$(worktree_kubeconfig_path)"
+  if [[ -n "${KUBECONFIG:-}" ]]; then
+    printf "  %-14s %s\n" "KUBECONFIG:" "${KUBECONFIG/#$HOME/~}"
   fi
 
   if [[ -n "${C_URLS[$idx]}" ]]; then
@@ -434,17 +420,14 @@ add_cluster() {
 
 DO_LOGIN="yes"
 ADD_CLUSTER="no"
-ISOLATE=""  # empty = auto-detect
 POSITIONAL=()
 
 while [[ $# -gt 0 ]]; do
   case $1 in
     --no-login) DO_LOGIN="no"; shift ;;
     --add-cluster) ADD_CLUSTER="yes"; shift ;;
-    --isolated) ISOLATE="yes"; shift ;;
-    --no-isolated) ISOLATE="no"; shift ;;
     --help|-h)
-      echo "Usage: odh-env [--no-login] [--isolated|--no-isolated] [<cluster-id> [<username>]]"
+      echo "Usage: odh-env [--no-login] [<cluster-id> [<username>]]"
       echo "       odh-env --add-cluster"
       echo ""
       echo "  odh-env                  List clusters and show active"
@@ -452,28 +435,12 @@ while [[ $# -gt 0 ]]; do
       echo "  odh-env <id> <user>      Switch to cluster with specific user"
       echo "  odh-env --no-login <id>  Switch without running make login"
       echo "  odh-env --add-cluster    Add a new cluster interactively"
-      echo ""
-      echo "  --isolated               Use a per-worktree kubeconfig (default in worktrees)"
-      echo "  --no-isolated            Use the shared ~/.kube/config even in a worktree"
       exit 0
       ;;
     -*) die "unknown flag: $1" ;;
     *) POSITIONAL+=("$1"); shift ;;
   esac
 done
-
-# Resolve isolation: auto-detect from worktree if not explicitly set
-if [[ -z "$ISOLATE" ]]; then
-  if is_in_worktree; then
-    ISOLATE="yes"
-  else
-    ISOLATE="no"
-  fi
-fi
-
-if [[ "$ISOLATE" == "yes" ]]; then
-  export KUBECONFIG="$(worktree_kubeconfig_path)"
-fi
 
 parse_clusters
 
@@ -488,7 +455,7 @@ else
   fi
   echo ""
   echo "Modified: ${ENV_FILE/#$HOME/~}"
-  if [[ "$ISOLATE" == "yes" ]]; then
-    echo "KUBECONFIG: $(worktree_kubeconfig_path | sed "s|$HOME|~|")"
+  if [[ -n "${KUBECONFIG:-}" ]]; then
+    echo "KUBECONFIG: ${KUBECONFIG/#$HOME/~}"
   fi
 fi

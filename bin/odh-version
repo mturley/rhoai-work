@@ -1,0 +1,262 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+WORKSPACE="$(dirname "$SCRIPT_DIR")"
+ODH_DIR="$WORKSPACE/opendatahub-io/odh-dashboard"
+UPSTREAM_REPO="opendatahub-io/odh-dashboard"
+DOWNSTREAM_REPO="red-hat-data-services/odh-dashboard"
+DOWNSTREAM_REMOTE_URL="https://github.com/$DOWNSTREAM_REPO.git"
+
+die() { echo "error: $*" >&2; exit 1; }
+
+# ---------------------------------------------------------------------------
+# Dependency checks
+# ---------------------------------------------------------------------------
+
+command -v oc >/dev/null 2>&1 || die "oc is not installed"
+oc whoami >/dev/null 2>&1 || die "not logged into a cluster (run oc login first)"
+
+CLUSTER_INFO_LINE=$(oc cluster-info 2>/dev/null | head -1)
+echo "$CLUSTER_INFO_LINE"
+echo ""
+CLUSTER_API=$(echo "$CLUSTER_INFO_LINE" | grep -oE 'https://[^ ]+' || true)
+CLUSTER_HOST="${CLUSTER_API#https://}"
+CLUSTER_HOST="${CLUSTER_HOST%%:*}"
+
+# ---------------------------------------------------------------------------
+# Auto-detect cluster type
+# ---------------------------------------------------------------------------
+
+CLUSTER_TYPE=""
+NAMESPACE=""
+DEPLOYMENT=""
+
+if oc get deployment rhods-dashboard -n redhat-ods-applications >/dev/null 2>&1; then
+  CLUSTER_TYPE="rhoai"
+  NAMESPACE="redhat-ods-applications"
+  DEPLOYMENT="rhods-dashboard"
+elif oc get deployment odh-dashboard -n opendatahub >/dev/null 2>&1; then
+  CLUSTER_TYPE="odh"
+  NAMESPACE="opendatahub"
+  DEPLOYMENT="odh-dashboard"
+else
+  die "no dashboard deployment found (checked rhods-dashboard in redhat-ods-applications, odh-dashboard in opendatahub)"
+fi
+
+# ---------------------------------------------------------------------------
+# Get the running image
+# ---------------------------------------------------------------------------
+
+CONTAINER_NAME="$DEPLOYMENT"
+IMAGE=$(oc get deployment "$DEPLOYMENT" -n "$NAMESPACE" \
+  -o jsonpath="{.spec.template.spec.containers[?(@.name==\"$CONTAINER_NAME\")].image}")
+
+[[ -n "$IMAGE" ]] || die "could not find container '$CONTAINER_NAME' in deployment '$DEPLOYMENT'"
+
+# Collect all container images for display
+ALL_CONTAINERS=$(oc get deployment "$DEPLOYMENT" -n "$NAMESPACE" \
+  -o jsonpath='{range .spec.template.spec.containers[*]}{.name}{"\t"}{.image}{"\n"}{end}')
+
+# ---------------------------------------------------------------------------
+# Extract image labels
+# ---------------------------------------------------------------------------
+
+get_labels_odh() {
+  local output
+  output=$(oc image info "$IMAGE" 2>&1) || die "oc image info failed for $IMAGE"
+  VCS_REF=$(echo "$output" | sed -n 's/.*vcs-ref=\([^ ]*\).*/\1/p' | head -1)
+  BUILD_DATE=$(echo "$output" | sed -n 's/.*build-date=\([^ ]*\).*/\1/p' | head -1)
+  # Extract tag from image ref (e.g. quay.io/opendatahub/odh-dashboard:v3.4.3-odh → v3.4.3-odh)
+  if [[ "$IMAGE" == *":"* && "$IMAGE" != *"@"* ]]; then
+    IMG_VERSION="${IMAGE##*:}"
+  else
+    IMG_VERSION=""
+  fi
+  GIT_URL=""
+}
+
+get_labels_rhoai() {
+  command -v jq >/dev/null 2>&1 || die "jq is required for RHOAI image inspection (brew install jq)"
+
+  # RHOAI images are on registry.redhat.io and may not be accessible via the
+  # public registry API (pre-release builds, per-arch manifest digests).
+  # Read labels from /root/buildinfo/labels.json inside a one-off pod on the cluster.
+  echo "Reading image labels from cluster..." >&2
+  local raw_output
+  raw_output=$(oc run odh-commit-label-reader --rm -i --restart=Never --quiet \
+    --image="$IMAGE" \
+    --command -- cat /root/buildinfo/labels.json 2>/dev/null) \
+    || die "could not read labels from image $IMAGE (oc run failed)"
+
+  # Extract just the JSON object from the output (skip any pod lifecycle messages)
+  local labels
+  labels=$(echo "$raw_output" | sed -n '/^{/,/^}/p')
+  [[ -n "$labels" ]] || die "no JSON found in label-reader output"
+
+  VCS_REF=$(echo "$labels" | jq -r '.["vcs-ref"] // empty')
+  BUILD_DATE=$(echo "$labels" | jq -r '.["build-date"] // empty')
+  IMG_VERSION=$(echo "$labels" | jq -r '.version // empty')
+  GIT_URL=$(echo "$labels" | jq -r '.["git.url"] // empty')
+}
+
+VCS_REF=""
+BUILD_DATE=""
+IMG_VERSION=""
+GIT_URL=""
+
+if [[ "$CLUSTER_TYPE" == "odh" ]]; then
+  get_labels_odh
+else
+  get_labels_rhoai
+fi
+
+[[ -n "$VCS_REF" ]] || die "could not extract vcs-ref label from image $IMAGE"
+
+# ---------------------------------------------------------------------------
+# Resolve upstream commit
+# ---------------------------------------------------------------------------
+
+UPSTREAM_SHA=""
+UPSTREAM_MSG=""
+UPSTREAM_DATE=""
+BEHIND_COUNT=""
+SOURCE_REPO=""
+
+if [[ "$CLUSTER_TYPE" == "odh" ]]; then
+  SOURCE_REPO="$UPSTREAM_REPO"
+  UPSTREAM_SHA="$VCS_REF"
+
+  if [[ -d "$ODH_DIR/.git" ]]; then
+    cd "$ODH_DIR"
+    if git cat-file -e "$UPSTREAM_SHA" 2>/dev/null; then
+      UPSTREAM_MSG=$(git log --oneline "$UPSTREAM_SHA" -1 --format='%s')
+      UPSTREAM_DATE=$(git log "$UPSTREAM_SHA" -1 --format='%ci')
+      if git rev-parse upstream/main >/dev/null 2>&1; then
+        BEHIND_COUNT=$(git rev-list --count "$UPSTREAM_SHA..upstream/main" 2>/dev/null || true)
+      fi
+    fi
+  fi
+
+else
+  # RHOAI: downstream commit needs merge-base resolution
+  SOURCE_REPO="${GIT_URL#https://github.com/}"
+  SOURCE_REPO="${SOURCE_REPO%.git}"
+  [[ -n "$SOURCE_REPO" ]] || SOURCE_REPO="$DOWNSTREAM_REPO"
+
+  [[ -d "$ODH_DIR/.git" ]] || die "local odh-dashboard clone not found at $ODH_DIR (needed for merge-base resolution)"
+
+  cd "$ODH_DIR"
+
+  # Ensure downstream remote exists
+  if ! git remote get-url downstream >/dev/null 2>&1; then
+    echo "Adding 'downstream' remote ($DOWNSTREAM_REMOTE_URL)..." >&2
+    git remote add downstream "$DOWNSTREAM_REMOTE_URL"
+  fi
+
+  # Fetch the downstream commit
+  echo "Fetching downstream commit ${VCS_REF:0:8}..." >&2
+  git fetch downstream "$VCS_REF" --depth=200 --quiet 2>/dev/null \
+    || die "could not fetch commit $VCS_REF from downstream remote"
+
+  # Ensure upstream/main is fresh
+  echo "Fetching upstream/main..." >&2
+  git fetch upstream main --quiet 2>/dev/null \
+    || die "could not fetch upstream/main"
+
+  # Find the merge-base
+  UPSTREAM_SHA=$(git merge-base "$VCS_REF" upstream/main 2>/dev/null) \
+    || die "git merge-base failed. Try increasing fetch depth or doing a full clone."
+
+  if git cat-file -e "$UPSTREAM_SHA" 2>/dev/null; then
+    UPSTREAM_MSG=$(git log --oneline "$UPSTREAM_SHA" -1 --format='%s')
+    UPSTREAM_DATE=$(git log "$UPSTREAM_SHA" -1 --format='%ci')
+    BEHIND_COUNT=$(git rev-list --count "$UPSTREAM_SHA..upstream/main" 2>/dev/null || true)
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+relative_time() {
+  local timestamp=$1
+  local then_epoch now_epoch diff
+  # Try GNU date first, fall back to macOS date
+  then_epoch=$(date -d "$timestamp" +%s 2>/dev/null \
+    || date -jf "%Y-%m-%dT%H:%M:%SZ" "$timestamp" +%s 2>/dev/null \
+    || date -jf "%Y-%m-%dT%H:%M:%S" "$timestamp" +%s 2>/dev/null \
+    || date -jf "%Y-%m-%d %H:%M:%S %z" "$timestamp" +%s 2>/dev/null \
+    || date -jf "%Y-%m-%d %H:%M:%S" "$timestamp" +%s 2>/dev/null) || return 1
+  now_epoch=$(date +%s)
+  diff=$((now_epoch - then_epoch))
+  [[ $diff -lt 0 ]] && diff=$((-diff))
+
+  local days=$((diff / 86400))
+  local hours=$(( (diff % 86400) / 3600 ))
+  local minutes=$(( (diff % 3600) / 60 ))
+
+  local parts=()
+  [[ $days -gt 0 ]] && parts+=("${days}d")
+  [[ $hours -gt 0 ]] && parts+=("${hours}h")
+  [[ $minutes -gt 0 ]] && parts+=("${minutes}m")
+  [[ ${#parts[@]} -eq 0 ]] && parts+=("just now")
+
+  local joined
+  joined=$(IFS=' '; echo "${parts[*]}")
+  [[ "$joined" != "just now" ]] && joined="$joined ago"
+  echo "$joined"
+}
+
+format_date() {
+  local date_str=$1
+  local rel
+  rel=$(relative_time "$date_str" 2>/dev/null) || true
+  if [[ -n "$rel" ]]; then
+    echo "$date_str ($rel)"
+  else
+    echo "$date_str"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Output
+# ---------------------------------------------------------------------------
+
+SHORT_SHA="${UPSTREAM_SHA:0:8}"
+SHORT_VCS="${VCS_REF:0:8}"
+TYPE_UPPER=$(echo "$CLUSTER_TYPE" | tr '[:lower:]' '[:upper:]')
+
+echo ""
+echo "Dashboard commit info for cluster: $CLUSTER_HOST"
+echo ""
+printf "  %-18s %s\n" "Cluster type:" "$TYPE_UPPER"
+printf "  %-18s %s\n" "Image:" "$IMAGE"
+[[ -n "$IMG_VERSION" ]] && printf "  %-18s %s\n" "Image version:" "$IMG_VERSION"
+[[ -n "$BUILD_DATE" ]] && printf "  %-18s %s\n" "Build date:" "$(format_date "$BUILD_DATE")"
+
+if [[ "$CLUSTER_TYPE" == "rhoai" ]]; then
+  echo ""
+  printf "  %-18s %s\n" "Source repo:" "$SOURCE_REPO"
+  printf "  %-18s %s\n" "Source commit:" "$SHORT_VCS"
+  printf "  %-18s %s\n" "GitHub:" "https://github.com/$SOURCE_REPO/commit/$SHORT_VCS"
+fi
+
+echo ""
+printf "  %-18s %s\n" "Upstream repo:" "$UPSTREAM_REPO"
+if [[ -n "$UPSTREAM_MSG" ]]; then
+  printf "  %-18s %s %s\n" "Upstream commit:" "$SHORT_SHA" "$UPSTREAM_MSG"
+else
+  printf "  %-18s %s\n" "Upstream commit:" "$SHORT_SHA"
+fi
+[[ -n "$UPSTREAM_DATE" ]] && printf "  %-18s %s\n" "Upstream date:" "$(format_date "$UPSTREAM_DATE")"
+[[ -n "$BEHIND_COUNT" ]] && printf "  %-18s %s commits\n" "Behind main by:" "$BEHIND_COUNT"
+printf "  %-18s %s\n" "GitHub:" "https://github.com/$UPSTREAM_REPO/commit/$SHORT_SHA"
+
+echo ""
+echo "  Containers:"
+echo "$ALL_CONTAINERS" | while IFS=$'\t' read -r name image; do
+  [[ -z "$name" ]] && continue
+  printf "    %-28s %s\n" "$name" "$image"
+done
+echo ""

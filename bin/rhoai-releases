@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+LIMIT="${1:-10}"
+
+curl -s "https://catalog.redhat.com/api/containers/v1/repositories/registry/registry.access.redhat.com/repository/rhoai%2Fodh-dashboard-rhel9/images?page_size=50&sort_by=freshness_grades.end_date%5Bdesc%5D" \
+  | jq -r '[.data[] | {version: (.parsed_data.labels[] | select(.name=="version") | .value), date: (.parsed_data.labels[] | select(.name=="build-date") | .value)}] | unique_by(.version) | sort_by(.version | split(".") | map(split("-")[0] | tonumber? // .)) | reverse | .[] | "\(.version)\t\(.date)"' 2>/dev/null \
+  | head -"$LIMIT" \
+  | while IFS=$'\t' read -r version date; do
+      printf "%-20s %s\n" "$version" "$date"
+    done

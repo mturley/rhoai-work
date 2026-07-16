@@ -10,6 +10,7 @@ else
   ODH_DIR="$WORKSPACE/opendatahub-io/odh-dashboard"
 fi
 ENV_FILE="$ODH_DIR/.env.local"
+MAIN_ODH_DIR="$WORKSPACE/opendatahub-io/odh-dashboard"
 
 die() { echo "error: $*" >&2; exit 1; }
 
@@ -28,6 +29,52 @@ retry_loop() {
   done
 }
 
+# If env files are missing and a main clone exists, offer to copy them
+ensure_env_files() {
+  local files=(.env.local .env.development.local)
+  local missing=()
+  for f in "${files[@]}"; do
+    [[ -f "$ODH_DIR/$f" ]] || missing+=("$f")
+  done
+  [[ ${#missing[@]} -gt 0 ]] || return 0
+
+  # Only offer to copy if we're in a worktree/clone separate from the main clone
+  if [[ "$ODH_DIR" == "$MAIN_ODH_DIR" ]]; then
+    die ".env.local not found at $ENV_FILE"
+  fi
+
+  # Check that the main clone has the files to copy
+  local copyable=()
+  for f in "${missing[@]}"; do
+    if [[ -f "$MAIN_ODH_DIR/$f" ]]; then
+      copyable+=("$f")
+    fi
+  done
+  if [[ ${#copyable[@]} -eq 0 ]]; then
+    die ".env.local not found at $ENV_FILE (and main clone has no env files to copy)"
+  fi
+
+  echo "Missing env files in $(basename "$ODH_DIR"):"
+  for f in "${copyable[@]}"; do
+    echo "  $f"
+  done
+  echo ""
+  echo "Copy from main clone at ${MAIN_ODH_DIR/#$HOME/~}?"
+  printf "[Y/n] "
+  read -r answer
+  answer=${answer:-y}
+  if [[ "$answer" =~ ^[Yy] ]]; then
+    for f in "${copyable[@]}"; do
+      cp "$MAIN_ODH_DIR/$f" "$ODH_DIR/$f"
+      echo "  Copied $f"
+    done
+    echo ""
+  else
+    die "Cannot proceed without .env.local"
+  fi
+}
+
+ensure_env_files
 [[ -f "$ENV_FILE" ]] || die ".env.local not found at $ENV_FILE"
 
 # ---------------------------------------------------------------------------

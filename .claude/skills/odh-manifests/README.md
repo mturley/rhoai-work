@@ -35,6 +35,17 @@ The skill detects the current cluster state and offers contextual actions:
 - Local clone of `odh-dashboard` at `~/git/rhoai-work/opendatahub-io/odh-dashboard/`
 - Internet access to `quay.io` (for tag listing and digest comparison)
 
+## Cluster Resources
+
+The skill creates or removes these hard-coded resources:
+
+| Resource | Namespace | Purpose |
+|----------|-----------|---------|
+| PVC `dashboard-dev-manifests` | `openshift-operators` | Stores custom manifests mounted into the operator pod |
+| VolumeMount `dashboard-manifests` | (on CSV/operator pod) | Mounts the PVC at `/opt/manifests/dashboard` |
+
+It also patches the operator CSV (`opendatahub-operator` in `openshift-operators`) and triggers rollouts on the `odh-dashboard` deployment in `opendatahub`.
+
 ## Scripts
 
 | Script | Purpose |

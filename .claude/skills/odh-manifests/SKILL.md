@@ -1,18 +1,29 @@
 ---
 name: odh-manifests
-description: Manage custom volume-mounted dashboard manifests on an ODH cluster. Check status, set up, update, switch image tags, or revert to operator-managed. Use when working with dashboard images on a dev cluster.
+description: Manage custom volume-mounted component manifests on an ODH cluster. Check status, set up, update, switch image tags, or revert to operator-managed. Supports dashboard and modelcontroller (model-serving-api). Use when working with component images on a dev cluster.
 ---
 
-# ODH Dashboard Manifests Manager
+# ODH Component Manifests Manager
 
-Manage custom volume-mounted dashboard manifests on an ODH cluster using the
+Manage custom volume-mounted component manifests on an ODH cluster using the
 [component-dev hack](https://github.com/opendatahub-io/opendatahub-operator/tree/main/hack/component-dev).
-This overrides the operator's built-in dashboard images with a chosen quay tag (e.g. `:main`, a PR build).
+This overrides the operator's built-in component images with chosen quay tags.
 
 **Scripts in this directory:**
-- `status.sh` — detect setup state (PVC, CSV mount, operator, images, digest comparison)
-- `quay-tags.sh` — fetch recent meaningful tags from quay.io
-- `copy-manifests.sh <tag>` — copy manifests with tag substitution into operator pod
+- `status.sh` — detect setup state (PVC, CSV mounts, operator, images, overridden components)
+- `quay-tags.sh [repo]` — fetch recent meaningful tags from quay.io (default repo: `opendatahub/odh-dashboard`)
+- `copy-manifests.sh <component> [tag]` — copy component manifests with tag substitution into operator pod
+- `setup.sh [component...]` — create PVC and patch CSV for component overrides (idempotent)
+- `revert.sh` — tear down custom setup (scale operator to 0, clean CSV, delete PVC)
+
+**Supported components:**
+
+| Component | Operator path | Repo | Key images |
+|-----------|--------------|------|------------|
+| `dashboard` | `/opt/manifests/dashboard` | `opendatahub-io/odh-dashboard` (local clone) | odh-dashboard + all module sidecars |
+| `modelcontroller` | `/opt/manifests/modelcontroller` | `opendatahub-io/odh-model-controller` (cloned on demand) | model-serving-api, odh-model-controller |
+
+The PVC is `custom-odh-dev-manifests` in `openshift-operators`, shared by all components via subPath mounts.
 
 ## Phase 1: Cluster Authentication & Confirmation
 
@@ -25,48 +36,59 @@ This overrides the operator's built-in dashboard images with a chosen quay tag (
 
 ## Phase 2: Detect Setup State
 
-Run the `status.sh` script from this skill's directory. Parse the JSON output.
+Run `./status.sh` from this skill's directory. Parse the JSON output.
 
-The script is at the path relative to this SKILL.md file: `./status.sh`
+Key fields:
+- `pvc_exists` — whether the PVC exists
+- `overridden_components` — list of component subPaths mounted (e.g. `["dashboard", "modelcontroller"]`)
+- `operator_replicas` / `operator_ready` — operator state
+- `containers` — dashboard container images and tags
+- `current_tag` — dashboard image tag
+- `image_current` — whether dashboard image matches quay latest for that tag
+- `other_components` — details on non-dashboard overridden components (deployments, images, tags)
 
-Interpret the results:
-- **Setup active:** `pvc_exists == true && csv_mounted == true && operator_replicas > 0`
-- **Partially set up:** some but not all indicators are true — warn the user
+Interpret:
+- **Setup active:** `pvc_exists == true && overridden_components is non-empty && operator_replicas > 0`
+- **Partially set up:** PVC exists but operator is down or no mounts
 - **Not set up:** `pvc_exists == false`
 
 ## Phase 3: Report Status
 
-Present a clear summary to the user based on the status JSON. Include:
-- Whether custom manifests are active and what tag is configured
-- PVC, CSV mount, and operator state
-- Current dashboard image tag and build age
-- Whether the running image matches the latest on quay for that tag
-- Local manifests repo commit (so user knows if they need to `git pull`)
+Present a clear summary including:
+- PVC and operator state
+- **For each overridden component:** what tag is running, whether images are current
+- Dashboard image tag, build age, and quay digest comparison
+- Other overridden components with their deployment images
+- Local manifests repo commit
+- Which Managed DSC components could also be overridden but aren't
 
 ## Phase 4: Offer Contextual Actions
 
-Use AskUserQuestion to present relevant actions. The available actions depend on state:
+Use AskUserQuestion to present relevant actions based on state:
 
 **If NOT set up:**
-- "Set up custom manifests" — full setup flow
+- "Set up custom manifests" — asks which components to override, then runs setup + copy flow
 
-**If set up and images outdated:**
-- "Update images" — rollout restart to pull latest
-- "Switch tag" — change to a different quay tag
-- "Revert" — tear down custom setup
+**If set up:**
+- "Update dashboard images" — rollout restart to pull latest for current tag (only if dashboard is overridden)
+- "Switch dashboard tag" — change dashboard to a different quay tag
+- "Manage another component" — add or update an override for another component
+- "Revert" — tear down the entire custom setup
+- "Do nothing"
 
-**If set up and images current:**
-- "Switch tag" — change to a different quay tag
-- "Force update" — rollout restart even though images match
-- "Revert" — tear down custom setup
-
-Always include a "Do nothing" option.
+If dashboard images are outdated, highlight the "Update" option.
 
 ---
 
 ## Action: Set Up Custom Manifests
 
-### Step 1: Ask for tag
+### Step 1: Ask which components
+
+Use AskUserQuestion with multiSelect:
+- "dashboard" (Recommended) — override dashboard and all module sidecars
+- "modelcontroller" — override model-serving-api and odh-model-controller
+
+### Step 2: Ask for dashboard tag (if dashboard selected)
 
 Use AskUserQuestion:
 - Option 1: `main` (Recommended)
@@ -74,114 +96,85 @@ Use AskUserQuestion:
 
 If "Another tag" is selected:
 1. Run `./quay-tags.sh` from this skill's directory
-2. Parse the tab-separated output and present the first 15 tags as AskUserQuestion options
+2. Parse the tab-separated output and present the first 15 tags as options
 3. The user can pick one or type a custom tag via "Other"
 
-### Step 2: Present the plan
+### Step 3: Ask for modelcontroller tag (if modelcontroller selected)
+
+Same flow, but use `./quay-tags.sh opendatahub/odh-model-serving-api` for tags.
+Default recommendation: use upstream defaults (no tag override).
+
+### Step 4: Present the plan
 
 Tell the user exactly what will happen:
-1. Create PVC `dashboard-dev-manifests` in `openshift-operators` (100Mi)
-2. Patch the CSV to mount PVC at `/opt/manifests/dashboard` (sets replicas=1, strategy=Recreate, fsGroup=1001)
-3. Wait for operator pod to start
-4. Copy manifests from local clone with the chosen tag substituted in params.env
-5. Restart operator to pick up new manifests
-6. Monitor dashboard rollout
+1. Create PVC `custom-odh-dev-manifests` in `openshift-operators` (if needed)
+2. Patch CSV with volume mount(s) for selected components (replicas=1, Recreate, fsGroup=1001)
+3. Wait for operator pod
+4. Copy manifests for each component with chosen tags
+5. Restart operator
+6. Monitor rollouts
 
-Ask user to confirm before proceeding.
+Ask user to confirm.
 
-### Step 3: Execute setup
+### Step 5: Execute
 
-**Create PVC:**
-```bash
-oc apply -f - <<'EOF'
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: dashboard-dev-manifests
-  namespace: openshift-operators
-spec:
-  accessModes: [ReadWriteOnce]
-  resources:
-    requests:
-      storage: 100Mi
-EOF
-```
-
-**Patch CSV:**
-First, check if the CSV already has the volume mount (the patch is NOT idempotent). If it does, skip this step and warn the user.
-
-```bash
-CSV=$(oc get csv -n openshift-operators -o name | grep opendatahub-operator | head -n1 | cut -d/ -f2)
-
-oc patch csv "$CSV" -n openshift-operators --type json -p '[
-  {"op": "replace", "path": "/spec/install/spec/deployments/0/spec/replicas", "value": 1},
-  {"op": "add", "path": "/spec/install/spec/deployments/0/spec/strategy", "value": {"type": "Recreate"}},
-  {"op": "add", "path": "/spec/install/spec/deployments/0/spec/template/spec/securityContext/fsGroup", "value": 1001},
-  {"op": "add", "path": "/spec/install/spec/deployments/0/spec/template/spec/containers/0/volumeMounts/-", "value": {"name": "dashboard-manifests", "mountPath": "/opt/manifests/dashboard"}},
-  {"op": "add", "path": "/spec/install/spec/deployments/0/spec/template/spec/volumes/-", "value": {"name": "dashboard-manifests", "persistentVolumeClaim": {"claimName": "dashboard-dev-manifests"}}}
-]'
-```
-
-**Wait for operator pod:**
-```bash
-oc wait --for='jsonpath={.status.conditions[?(@.type=="Ready")].status}=True' \
-  po -l name=opendatahub-operator -n openshift-operators --timeout=120s
-```
-
-**Copy manifests with tag:**
-Run `./copy-manifests.sh <tag>` from this skill's directory.
-
-**Monitor dashboard rollout:**
+Run `./setup.sh <components...>` from this skill's directory.
+Then for each component, run `./copy-manifests.sh <component> [tag]`.
+Monitor rollouts:
 ```bash
 oc rollout status deployment/odh-dashboard -n opendatahub --timeout=300s
 ```
+If modelcontroller was set up, also check `model-serving-api`.
 
-If the rollout times out, enter troubleshooting:
-- `oc get pods -n opendatahub -l app=odh-dashboard`
-- Check events: `oc get events -n opendatahub --sort-by='.lastTimestamp' | grep dashboard | tail -10`
-- Check container statuses on any non-Ready pod
-- Report findings and suggest fixes (common: CPU pressure — suggest deleting unused InferenceServices)
+If any rollout times out, troubleshoot:
+- Check pod events and container statuses
+- Common issue: CPU pressure — suggest deleting unused InferenceServices
 
-**Final status check:** Run `status.sh` again and report the result.
+Run `./status.sh` and report final state.
 
 ---
 
-## Action: Update Images
+## Action: Update Dashboard Images
 
-1. Tell the user: "Restarting dashboard deployment to pull the latest `:TAG` images from quay."
-2. Run:
-   ```bash
-   oc rollout restart deployment/odh-dashboard -n opendatahub
-   ```
+1. Tell the user: "Restarting dashboard deployment to pull the latest `:TAG` images."
+2. Run `oc rollout restart deployment/odh-dashboard -n opendatahub`
 3. Monitor with `oc rollout status deployment/odh-dashboard -n opendatahub --timeout=300s`
-4. If rollout times out, troubleshoot (same as setup).
-5. Run `status.sh` and report final state.
+4. If rollout times out, troubleshoot.
+5. Run `./status.sh` and report final state.
 
 ---
 
-## Action: Switch Tag
+## Action: Switch Dashboard Tag
 
 ### Step 1: Ask for new tag
 
-Same tag selection flow as setup (AskUserQuestion with `main` or "Another tag" → `quay-tags.sh`).
+Same tag selection flow as setup.
 
-### Step 2: Present the plan
-
-Tell the user:
-1. Copy manifests to temp dir with the new tag in params.env
-2. Copy into operator pod
-3. Restart operator to pick up new manifests
-4. Monitor dashboard rollout
-
-Ask to confirm.
+### Step 2: Present plan and confirm
 
 ### Step 3: Execute
 
-Run `./copy-manifests.sh <new-tag>` from this skill's directory. This handles the temp copy, sed edits, oc cp, and operator restart.
+Run `./copy-manifests.sh dashboard <new-tag>` from this skill's directory (handles temp copy, sed edits, oc cp, operator restart).
+Monitor: `oc rollout status deployment/odh-dashboard -n opendatahub --timeout=300s`
+Run `./status.sh` and report final state.
 
-Then monitor: `oc rollout status deployment/odh-dashboard -n opendatahub --timeout=300s`
+---
 
-If rollout times out, troubleshoot. Run `status.sh` and report final state.
+## Action: Manage Another Component
+
+### Step 1: Ask which component
+
+Present components that are Managed in the DSC but not currently overridden.
+Currently supported: `dashboard`, `modelcontroller`.
+
+### Step 2: Ask for tag (if applicable)
+
+### Step 3: Execute
+
+Run `./setup.sh <component>` to add the CSV mount (idempotent).
+Then run `./copy-manifests.sh <component> [tag]`.
+Monitor relevant deployment rollout.
+Run `./status.sh` and report final state.
 
 ---
 
@@ -189,67 +182,24 @@ If rollout times out, troubleshoot. Run `status.sh` and report final state.
 
 ### Step 1: Present the plan
 
-Tell the user exactly what will happen:
-1. Scale operator deployment to 0 replicas
-2. Clean the CSV: remove volume mount, volume, fsGroup, Recreate strategy
-3. Delete the PVC
-4. Note: the dashboard deployment will remain running with its current images — the operator just stops managing it
+Tell the user:
+1. Scale operator to 0
+2. Clean CSV: remove all custom-dev-manifests volume mounts, volume, fsGroup, Recreate strategy
+3. Delete PVC
+4. Dashboard and other deployments remain running with their current images
 
 Ask to confirm.
 
-### Step 2: Execute revert
+### Step 2: Execute
 
-**Scale operator to 0:**
-```bash
-oc scale deployment/opendatahub-operator-controller-manager -n openshift-operators --replicas=0
-```
-
-**Clean CSV:**
-```bash
-CSV=$(oc get csv -n openshift-operators -o name | grep opendatahub-operator | head -n1 | cut -d/ -f2)
-
-oc get csv "$CSV" -n openshift-operators -o json | python3 -c "
-import json, sys
-csv = json.load(sys.stdin)
-deploy = csv['spec']['install']['spec']['deployments'][0]
-spec = deploy['spec']
-
-spec.pop('strategy', None)
-
-pod_spec = spec['template']['spec']
-sc = pod_spec.get('securityContext', {})
-sc.pop('fsGroup', None)
-if not sc:
-    pod_spec.pop('securityContext', None)
-
-container = pod_spec['containers'][0]
-container['volumeMounts'] = [
-    vm for vm in container.get('volumeMounts', [])
-    if vm.get('name') != 'dashboard-manifests'
-]
-
-pod_spec['volumes'] = [
-    v for v in pod_spec.get('volumes', [])
-    if v.get('name') != 'dashboard-manifests'
-]
-
-spec['replicas'] = 0
-json.dump(csv, sys.stdout)
-" | oc replace -f -
-```
-
-**Delete PVC:**
-```bash
-oc delete pvc dashboard-dev-manifests -n openshift-operators --ignore-not-found
-```
-
-Report completion. Run `status.sh` for final state.
+Run `./revert.sh` from this skill's directory.
+Run `./status.sh` and report final state.
 
 ---
 
 ## Error Handling
 
 - If `oc` auth fails at any point, stop and tell the user to `oc login`.
-- If a step fails, report the error with context (command run, output received) and stop.
-- Never proceed past a failed step — the user needs to know what went wrong.
-- The CSV patch is NOT idempotent. Before patching, check if the volume mount already exists and skip if so.
+- If a step fails, report the error with context and stop.
+- `setup.sh` is idempotent — safe to run multiple times.
+- `copy-manifests.sh` requires the operator pod to be running.

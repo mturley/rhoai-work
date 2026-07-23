@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+echo "Restarting dashboard..."
+oc rollout restart deployment/odh-dashboard -n opendatahub
+echo "Watching..."
+oc rollout status deployment/odh-dashboard -n opendatahub

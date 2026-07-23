@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+NS="opendatahub"
+while getopts "n:" opt; do
+  case $opt in
+    n) NS="$OPTARG" ;;
+    *) echo "Usage: $0 [-n namespace]"; exit 1 ;;
+  esac
+done
+
+ANNOTATION="opendatahub.io/unsupported-status-accepted"
+
+TARGETS=()
+for kind in llminferenceserviceconfigs templates; do
+  names=$(oc get "$kind" -n "$NS" -o json | jq -r ".items[] | select(.metadata.annotations[\"$ANNOTATION\"] != null) | .metadata.name")
+  for name in $names; do
+    TARGETS+=("$kind/$name")
+  done
+done
+
+if [ ${#TARGETS[@]} -eq 0 ]; then
+  echo "No resources in $NS have the $ANNOTATION annotation."
+  exit 0
+fi
+
+echo "Will remove annotation '$ANNOTATION' from ${#TARGETS[@]} resource(s) in $NS:"
+for t in "${TARGETS[@]}"; do
+  echo "  - $t"
+done
+
+read -rp "Proceed? [y/N] " answer
+if [[ ! "$answer" =~ ^[Yy]$ ]]; then
+  echo "Aborted."
+  exit 0
+fi
+
+for t in "${TARGETS[@]}"; do
+  kind="${t%%/*}"
+  name="${t#*/}"
+  oc annotate "$kind" "$name" -n "$NS" "$ANNOTATION-"
+done
+
+echo "Done."

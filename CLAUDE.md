@@ -96,8 +96,8 @@ Many Jira issues in the RHOAIENG project span multiple repos. When working on su
 Team and tool configuration is available via the `skills-context/` symlink (pointing to `~/.claude/skills/.context/`):
 
 - `skills-context/people.md` — Full team roster with Jira usernames, GitHub usernames, and emails. Read this when you need team member information for Jira assignments, PR reviews, or understanding who works on what.
-- `skills-context/jira-mcp.md` — Jira MCP server configuration, custom field IDs, format requirements
-- `skills-context/confluence-mcp.md` — Confluence integration, user key resolution, page ID extraction
+- `skills-context/jira.md` — Jira reference: custom field IDs, format requirements, JQL patterns
+- `skills-context/confluence.md` — Confluence reference: user key resolution, page ID extraction
 - `skills-context/puppeteer-mcp.md` — Browser automation configuration
 
 Read the relevant context file before using the corresponding MCP tools.

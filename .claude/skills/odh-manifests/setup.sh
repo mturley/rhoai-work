@@ -17,11 +17,6 @@ else
   COMPONENTS=("$@")
 fi
 
-# Component → operator manifest path mapping
-declare -A MOUNT_PATHS
-MOUNT_PATHS[dashboard]="/opt/manifests/dashboard"
-MOUNT_PATHS[modelcontroller]="/opt/manifests/modelcontroller"
-
 # 1. Create PVC if needed
 if oc get pvc "$PVC_NAME" -n "$OPERATOR_NS" &>/dev/null; then
   echo "PVC $PVC_NAME already exists, skipping creation." >&2

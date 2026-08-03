@@ -40,15 +40,31 @@ case "$COMPONENT" in
     trap 'rm -rf "$TMPDIR"' EXIT
     cp -r "$MANIFESTS_SRC/." "$TMPDIR/"
 
+    # Main dashboard image in odh/params.env
     sed -i.bak "s|^odh-dashboard-image=.*|odh-dashboard-image=quay.io/opendatahub/odh-dashboard:${TAG}|" "$TMPDIR/odh/params.env"
-    sed -i.bak "s|^model-registry-ui-image=.*|model-registry-ui-image=quay.io/opendatahub/odh-mod-arch-modular-architecture:${TAG}|" "$TMPDIR/modular-architecture/params.env"
-    sed -i.bak "s|^gen-ai-ui-image=.*|gen-ai-ui-image=quay.io/opendatahub/odh-mod-arch-gen-ai:${TAG}|" "$TMPDIR/modular-architecture/params.env"
-    sed -i.bak "s|^maas-ui-image=.*|maas-ui-image=quay.io/opendatahub/mod-arch-maas:${TAG}|" "$TMPDIR/modular-architecture/params.env"
-    sed -i.bak "s|^mlflow-ui-image=.*|mlflow-ui-image=quay.io/opendatahub/odh-mod-arch-mlflow:${TAG}|" "$TMPDIR/modular-architecture/params.env"
-    sed -i.bak "s|^eval-hub-ui-image=.*|eval-hub-ui-image=quay.io/opendatahub/odh-mod-arch-eval-hub:${TAG}|" "$TMPDIR/modular-architecture/params.env"
-    sed -i.bak "s|^automl-ui-image=.*|automl-ui-image=quay.io/opendatahub/odh-mod-arch-automl:${TAG}|" "$TMPDIR/modular-architecture/params.env"
-    sed -i.bak "s|^autorag-ui-image=.*|autorag-ui-image=quay.io/opendatahub/odh-mod-arch-autorag:${TAG}|" "$TMPDIR/modular-architecture/params.env"
-    sed -i.bak "s|^agent-ops-ui-image=.*|agent-ops-ui-image=quay.io/opendatahub/odh-mod-arch-agent-ops:${TAG}|" "$TMPDIR/modular-architecture/params.env"
+    sed -i.bak "s|^core-bff-image=.*|core-bff-image=quay.io/opendatahub/odh-core-bff:${TAG}|" "$TMPDIR/odh/params.env"
+
+    # Module UI images in sidecar/params.env (combined file)
+    for key_val in \
+      "model-registry-ui-image=quay.io/opendatahub/odh-mod-arch-modular-architecture:${TAG}" \
+      "gen-ai-ui-image=quay.io/opendatahub/odh-mod-arch-gen-ai:${TAG}" \
+      "maas-ui-image=quay.io/opendatahub/mod-arch-maas:${TAG}" \
+      "mlflow-ui-image=quay.io/opendatahub/odh-mod-arch-mlflow:${TAG}" \
+      "eval-hub-ui-image=quay.io/opendatahub/odh-mod-arch-eval-hub:${TAG}" \
+      "automl-ui-image=quay.io/opendatahub/odh-mod-arch-automl:${TAG}" \
+      "autorag-ui-image=quay.io/opendatahub/odh-mod-arch-autorag:${TAG}" \
+      "agent-ops-ui-image=quay.io/opendatahub/odh-mod-arch-agent-ops:${TAG}"; do
+      key="${key_val%%=*}"
+      sed -i.bak "s|^${key}=.*|${key_val}|" "$TMPDIR/sidecar/params.env"
+    done
+
+    # Per-module params.env files under modules/
+    for mod_params in "$TMPDIR"/modules/*/params.env; do
+      [ -f "$mod_params" ] || continue
+      # Replace any *-ui-image= lines with the tag, preserving the image repo
+      sed -i.bak -E "s|(^[a-z-]+-ui-image=quay\.io/[^:]+):.*|\1:${TAG}|" "$mod_params"
+    done
+
     find "$TMPDIR" -name '*.bak' -delete
 
     echo "Edited dashboard params.env files with tag: $TAG" >&2

@@ -1,6 +1,7 @@
 ---
 name: open-mr
 description: Open the hub repo in a new VS Code window with an independent Claude Code session.
+disable-model-invocation: true
 ---
 
 Open the hub repo in a new editor window, unsetting the `CLAUDECODE` environment variable so the new window gets its own independent Claude Code session instead of inheriting this one.

@@ -1,0 +1,963 @@
+#!/usr/bin/env bash
+# Manage custom volume-mounted ODH component manifests on a dev cluster.
+#
+# Overrides the operator's built-in component images with chosen quay tags using
+# the component-dev hack:
+#   https://github.com/opendatahub-io/opendatahub-operator/tree/main/hack/component-dev
+#
+# Run with no arguments for an interactive menu, or use a subcommand directly.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+WORKSPACE="$(dirname "$SCRIPT_DIR")"
+ODH_DIR="$WORKSPACE/opendatahub-io/odh-dashboard"
+
+OPERATOR_NS="openshift-operators"
+OPERATOR_DEPLOY="opendatahub-operator-controller-manager"
+DASHBOARD_NS="opendatahub"
+DASHBOARD_DEPLOY="odh-dashboard"
+PVC_NAME="custom-odh-dev-manifests"
+VOLUME_NAME="custom-dev-manifests"
+DASHBOARD_REPO="opendatahub/odh-dashboard"
+MODELCONTROLLER_REPO="opendatahub/odh-model-serving-api"
+
+# ---------------------------------------------------------------------------
+# Output helpers
+# ---------------------------------------------------------------------------
+
+if [ -t 1 ]; then
+  C_RESET=$'\033[0m'; C_BOLD=$'\033[1m'; C_DIM=$'\033[2m'
+  C_RED=$'\033[31m'; C_GREEN=$'\033[32m'; C_YELLOW=$'\033[33m'; C_CYAN=$'\033[36m'
+else
+  C_RESET=""; C_BOLD=""; C_DIM=""; C_RED=""; C_GREEN=""; C_YELLOW=""; C_CYAN=""
+fi
+
+die()  { echo "${C_RED}error:${C_RESET} $*" >&2; exit 1; }
+warn() { echo "${C_YELLOW}warning:${C_RESET} $*" >&2; }
+info() { echo "${C_CYAN}==>${C_RESET} $*" >&2; }
+ok()   { echo "${C_GREEN}✓${C_RESET} $*" >&2; }
+
+confirm() {
+  local prompt="$1" reply
+  read -r -p "$prompt [y/N] " reply </dev/tty
+  case "$reply" in [yY]|[yY][eE][sS]) return 0 ;; *) return 1 ;; esac
+}
+
+# ---------------------------------------------------------------------------
+# Write gating
+#
+# Every command that mutates cluster state goes through confirm_run or
+# confirm_run_stdin. Both print the exact command (and any piped payload)
+# before asking for approval. Pass --yes to skip the prompts.
+# ---------------------------------------------------------------------------
+
+ASSUME_YES=false
+
+# Quote an argument for display so the printed command is copy-pasteable.
+shell_quote() {
+  case "$1" in
+    *[!A-Za-z0-9_/.:=@-]*) printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")" ;;
+    "")                    printf "''" ;;
+    *)                     printf '%s' "$1" ;;
+  esac
+}
+
+format_command() {
+  local arg out=""
+  for arg in "$@"; do
+    out="$out $(shell_quote "$arg")"
+  done
+  printf '%s' "${out# }"
+}
+
+# confirm_run <cmd> [args...]
+confirm_run() {
+  if [ "$ASSUME_YES" = true ]; then
+    "$@"
+    return
+  fi
+  echo "" >&2
+  echo "${C_BOLD}${C_YELLOW}This will modify the cluster:${C_RESET}" >&2
+  echo "" >&2
+  echo "  ${C_CYAN}$(format_command "$@")${C_RESET}" >&2
+  echo "" >&2
+  confirm "Run it?" || die "aborted by user"
+  "$@"
+}
+
+# confirm_run_stdin <payload> <label> <cmd> [args...]
+# Shows the payload that will be piped into the command, then runs it.
+# Long payloads are truncated — pass an empty label to suppress the dump
+# entirely (useful when the caller has already printed a better summary).
+PAYLOAD_PREVIEW_LINES=40
+
+confirm_run_stdin() {
+  local payload="$1" label="$2" total
+  shift 2
+  if [ "$ASSUME_YES" = true ]; then
+    printf '%s' "$payload" | "$@"
+    return
+  fi
+  echo "" >&2
+  echo "${C_BOLD}${C_YELLOW}This will modify the cluster:${C_RESET}" >&2
+  echo "" >&2
+  echo "  ${C_CYAN}$(format_command "$@")${C_RESET}" >&2
+  echo "" >&2
+  if [ -n "$label" ]; then
+    echo "${C_BOLD}${label}${C_RESET}" >&2
+    total=$(printf '%s\n' "$payload" | wc -l | tr -d ' ')
+    printf '%s\n' "$payload" | head -n "$PAYLOAD_PREVIEW_LINES" | sed 's/^/  /' >&2
+    if [ "$total" -gt "$PAYLOAD_PREVIEW_LINES" ]; then
+      echo "  ${C_DIM}... $((total - PAYLOAD_PREVIEW_LINES)) more lines${C_RESET}" >&2
+    fi
+    echo "" >&2
+  fi
+  confirm "Run it?" || die "aborted by user"
+  printf '%s' "$payload" | "$@"
+}
+
+# ---------------------------------------------------------------------------
+# Dependency and auth checks
+# ---------------------------------------------------------------------------
+
+require_deps() {
+  command -v oc >/dev/null 2>&1 || die "oc is not installed"
+  command -v jq >/dev/null 2>&1 || die "jq is not installed (brew install jq)"
+  command -v curl >/dev/null 2>&1 || die "curl is not installed"
+}
+
+require_cluster() {
+  oc whoami >/dev/null 2>&1 || die "not logged into a cluster (run 'oc login' or 'odh-env <name>')"
+}
+
+cluster_api() {
+  oc cluster-info 2>/dev/null | head -1 | grep -oE 'https://[^ ]+' || echo "unknown"
+}
+
+# ---------------------------------------------------------------------------
+# Component metadata
+# ---------------------------------------------------------------------------
+
+SUPPORTED_COMPONENTS="dashboard modelcontroller"
+
+mount_path_for() {
+  case "$1" in
+    dashboard)       echo "/opt/manifests/dashboard" ;;
+    modelcontroller) echo "/opt/manifests/modelcontroller" ;;
+    *) return 1 ;;
+  esac
+}
+
+validate_component() {
+  mount_path_for "$1" >/dev/null 2>&1 \
+    || die "unknown component '$1' (supported: $SUPPORTED_COMPONENTS)"
+}
+
+quay_repo_for() {
+  case "$1" in
+    dashboard)       echo "$DASHBOARD_REPO" ;;
+    modelcontroller) echo "$MODELCONTROLLER_REPO" ;;
+    *) return 1 ;;
+  esac
+}
+
+# ---------------------------------------------------------------------------
+# Cluster queries
+# ---------------------------------------------------------------------------
+
+find_csv() {
+  oc get csv -n "$OPERATOR_NS" -o name 2>/dev/null \
+    | grep opendatahub-operator | head -n1 | cut -d/ -f2 || true
+}
+
+find_operator_pod() {
+  oc get po -l name=opendatahub-operator -n "$OPERATOR_NS" \
+    -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true
+}
+
+wait_for_operator() {
+  local timeout="${1:-120s}"
+  info "Waiting for operator pod to be ready..."
+  oc wait --for='jsonpath={.status.conditions[?(@.type=="Ready")].status}=True' \
+    po -l name=opendatahub-operator -n "$OPERATOR_NS" --timeout="$timeout"
+}
+
+# Emits the full state as JSON on stdout.
+gather_status() {
+  local pvc_exists csv_name overridden operator_replicas operator_ready
+  local containers pod_image_id current_tag quay_digest image_current local_commit other
+
+  pvc_exists=false
+  oc get pvc "$PVC_NAME" -n "$OPERATOR_NS" >/dev/null 2>&1 && pvc_exists=true
+
+  csv_name="$(find_csv)"
+  overridden='[]'
+  if [ -n "$csv_name" ]; then
+    overridden=$(oc get csv "$csv_name" -n "$OPERATOR_NS" \
+      -o jsonpath='{.spec.install.spec.deployments[0].spec.template.spec.containers[0].volumeMounts}' 2>/dev/null \
+      | jq -c --arg vol "$VOLUME_NAME" \
+          '[.[] | select(.name == $vol and has("subPath")) | .subPath]' 2>/dev/null || echo '[]')
+  fi
+
+  operator_replicas=$(oc get deployment "$OPERATOR_DEPLOY" -n "$OPERATOR_NS" \
+    -o jsonpath='{.spec.replicas}' 2>/dev/null || echo 0)
+  operator_ready=$(oc get deployment "$OPERATOR_DEPLOY" -n "$OPERATOR_NS" \
+    -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo 0)
+  operator_replicas="${operator_replicas:-0}"
+  operator_ready="${operator_ready:-0}"
+
+  containers=$(oc get deployment "$DASHBOARD_DEPLOY" -n "$DASHBOARD_NS" -o json 2>/dev/null \
+    | jq -c '[.spec.template.spec.containers[]
+              | {name, image, tag: (.image | split(":") | if length > 1 then .[-1] else "latest" end)}]' \
+      2>/dev/null || echo '[]')
+
+  pod_image_id=$(oc get pods -n "$DASHBOARD_NS" -l app=odh-dashboard \
+    -o jsonpath='{.items[0].status.containerStatuses[?(@.name=="odh-dashboard")].imageID}' 2>/dev/null || true)
+
+  current_tag=$(echo "$containers" | jq -r '(.[] | select(.name == "odh-dashboard") | .tag) // "unknown"' 2>/dev/null || echo unknown)
+  current_tag="${current_tag:-unknown}"
+
+  quay_digest=""
+  image_current="unknown"
+  if [ "$current_tag" != "unknown" ]; then
+    quay_digest=$(curl -sf \
+      "https://quay.io/api/v1/repository/${DASHBOARD_REPO}/tag/?specificTag=${current_tag}&onlyActiveTags=true" 2>/dev/null \
+      | jq -r '.tags[0].manifest_digest // ""' 2>/dev/null || true)
+    if [ -n "$quay_digest" ] && [ -n "$pod_image_id" ]; then
+      if [ "${pod_image_id##*@}" = "$quay_digest" ]; then
+        image_current=true
+      else
+        image_current=false
+      fi
+    fi
+  fi
+
+  local_commit=""
+  [ -d "$ODH_DIR/.git" ] && local_commit=$(git -C "$ODH_DIR" rev-parse --short HEAD 2>/dev/null || true)
+
+  other=$(gather_other_components "$overridden")
+
+  jq -n \
+    --argjson pvc_exists "$pvc_exists" \
+    --arg pvc_name "$PVC_NAME" \
+    --arg csv_name "$csv_name" \
+    --argjson overridden_components "$overridden" \
+    --argjson operator_replicas "$operator_replicas" \
+    --argjson operator_ready "$operator_ready" \
+    --arg dashboard_namespace "$DASHBOARD_NS" \
+    --argjson containers "$containers" \
+    --arg current_tag "$current_tag" \
+    --arg pod_image_id "$pod_image_id" \
+    --arg quay_latest_digest "$quay_digest" \
+    --arg image_current "$image_current" \
+    --arg local_manifests_commit "$local_commit" \
+    --argjson other_components "$other" \
+    '$ARGS.named'
+}
+
+# Given a JSON array of overridden component names, emit details for non-dashboard ones.
+gather_other_components() {
+  local overridden="$1" comp result img tag entries
+  result='[]'
+  for comp in $(echo "$overridden" | jq -r '.[]' 2>/dev/null); do
+    [ "$comp" = "dashboard" ] && continue
+    entries='[]'
+    while IFS=$'\t' read -r deploy container; do
+      [ -z "$deploy" ] && continue
+      img=$(oc get deployment "$deploy" -n "$DASHBOARD_NS" \
+        -o jsonpath="{.spec.template.spec.containers[?(@.name==\"$container\")].image}" 2>/dev/null || true)
+      [ -z "$img" ] && continue
+      tag="${img##*:}"
+      [ "$tag" = "$img" ] && tag=latest
+      entries=$(echo "$entries" | jq -c --arg d "$deploy" --arg i "$img" --arg t "$tag" \
+        '. + [{deployment: $d, image: $i, tag: $t}]')
+    done <<EOF
+$(deployments_for "$comp")
+EOF
+    result=$(echo "$result" | jq -c --arg n "$comp" --argjson d "$entries" \
+      '. + [{name: $n, deployments: $d}]')
+  done
+  echo "$result"
+}
+
+# Tab-separated "deployment<TAB>container" lines for a component.
+deployments_for() {
+  case "$1" in
+    modelcontroller)
+      printf 'model-serving-api\tserver\n'
+      printf 'odh-model-controller\tmanager\n'
+      ;;
+    kserve)        printf 'kserve-controller-manager\tmanager\n' ;;
+    modelregistry) printf 'model-registry-operator-controller-manager\tmanager\n' ;;
+  esac
+}
+
+# ---------------------------------------------------------------------------
+# Status reporting
+# ---------------------------------------------------------------------------
+
+print_status() {
+  local s="$1"
+  local pvc overridden replicas ready tag image_current commit csv
+
+  pvc=$(echo "$s" | jq -r '.pvc_exists')
+  csv=$(echo "$s" | jq -r '.csv_name // ""')
+  overridden=$(echo "$s" | jq -r '.overridden_components | join(", ")')
+  replicas=$(echo "$s" | jq -r '.operator_replicas')
+  ready=$(echo "$s" | jq -r '.operator_ready')
+  tag=$(echo "$s" | jq -r '.current_tag')
+  image_current=$(echo "$s" | jq -r '.image_current')
+  commit=$(echo "$s" | jq -r '.local_manifests_commit // "unknown"')
+
+  echo ""
+  echo "${C_BOLD}Cluster${C_RESET}    $(cluster_api)"
+  echo "${C_BOLD}User${C_RESET}       $(oc whoami 2>/dev/null || echo unknown)"
+  echo ""
+  echo "${C_BOLD}Setup state:${C_RESET} $(describe_state "$s")"
+  echo "  PVC              $PVC_NAME $([ "$pvc" = true ] && echo "${C_GREEN}exists${C_RESET}" || echo "${C_DIM}absent${C_RESET}")"
+  echo "  CSV              ${csv:-${C_DIM}none${C_RESET}}"
+  echo "  Operator         ${ready}/${replicas} ready"
+  echo "  Overridden       ${overridden:-${C_DIM}none${C_RESET}}"
+  echo "  Local manifests  $commit"
+  echo ""
+
+  if echo "$s" | jq -e '.overridden_components | index("dashboard")' >/dev/null 2>&1; then
+    case "$image_current" in
+      true)  echo "${C_BOLD}Dashboard${C_RESET}  tag ${C_CYAN}${tag}${C_RESET}  ${C_GREEN}up to date${C_RESET}" ;;
+      false) echo "${C_BOLD}Dashboard${C_RESET}  tag ${C_CYAN}${tag}${C_RESET}  ${C_YELLOW}outdated — newer image on quay${C_RESET}" ;;
+      *)     echo "${C_BOLD}Dashboard${C_RESET}  tag ${C_CYAN}${tag}${C_RESET}  ${C_DIM}freshness unknown${C_RESET}" ;;
+    esac
+    echo "$s" | jq -r '.containers[] | "  \(.name)\t\(.image)"' | column -t -s$'\t' 2>/dev/null \
+      || echo "$s" | jq -r '.containers[] | "  \(.name)  \(.image)"'
+    echo ""
+  fi
+
+  if [ "$(echo "$s" | jq -r '.other_components | length')" != "0" ]; then
+    echo "${C_BOLD}Other overridden components${C_RESET}"
+    echo "$s" | jq -r '.other_components[] | .name as $n | .deployments[] | "  \($n)\t\(.deployment)\t\(.image)"' \
+      | column -t -s$'\t' 2>/dev/null \
+      || echo "$s" | jq -r '.other_components[] | .name as $n | .deployments[] | "  \($n)  \(.deployment)  \(.image)"'
+    echo ""
+  fi
+}
+
+describe_state() {
+  local s="$1" pvc count replicas
+  pvc=$(echo "$s" | jq -r '.pvc_exists')
+  count=$(echo "$s" | jq -r '.overridden_components | length')
+  replicas=$(echo "$s" | jq -r '.operator_replicas')
+
+  if [ "$pvc" != true ]; then
+    echo "${C_DIM}not set up${C_RESET}"
+  elif [ "$count" = "0" ] || [ "$replicas" = "0" ]; then
+    echo "${C_YELLOW}partially set up${C_RESET}"
+  else
+    echo "${C_GREEN}active${C_RESET}"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Quay tags
+# ---------------------------------------------------------------------------
+
+quay_tags() {
+  local repo="${1:-$DASHBOARD_REPO}" limit="${2:-100}"
+  curl -sf "https://quay.io/api/v1/repository/${repo}/tag/?limit=${limit}&onlyActiveTags=true" \
+    | jq -r '
+        .tags[]
+        | .name as $n
+        | select(($n | test("\\.(sig|sbom|att|src|dockerfile|git)$")) | not)
+        | select(($n | test("^sha256-|build-image|-linux-x86|-linux-aarch|^[0-9a-f]{40}$")) | not)
+        | "\($n)\t\(.last_modified // "")"
+      '
+}
+
+prompt_for_tag() {
+  local component="$1" repo tag choice i=1
+  repo="$(quay_repo_for "$component")"
+
+  echo "" >&2
+  echo "${C_BOLD}Recent tags for ${repo}${C_RESET}" >&2
+  local tags=()
+  while IFS=$'\t' read -r name modified; do
+    [ -z "$name" ] && continue
+    tags+=("$name")
+    printf '  %2d) %-28s %s\n' "$i" "$name" "${C_DIM}${modified}${C_RESET}" >&2
+    i=$((i + 1))
+    [ "$i" -gt 15 ] && break
+  done < <(quay_tags "$repo")
+
+  echo "" >&2
+  read -r -p "Tag number, or type a tag name: " choice </dev/tty
+  if [ -z "$choice" ]; then
+    die "no tag selected"
+  elif echo "$choice" | grep -qE '^[0-9]+$' && [ "$choice" -ge 1 ] && [ "$choice" -le "${#tags[@]}" ]; then
+    tag="${tags[$((choice - 1))]}"
+  else
+    tag="$choice"
+  fi
+  echo "$tag"
+}
+
+# ---------------------------------------------------------------------------
+# Setup
+# ---------------------------------------------------------------------------
+
+ensure_pvc() {
+  if oc get pvc "$PVC_NAME" -n "$OPERATOR_NS" >/dev/null 2>&1; then
+    info "PVC $PVC_NAME already exists"
+    return
+  fi
+  info "Creating PVC $PVC_NAME"
+  local manifest
+  manifest=$(cat <<EOF
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: $PVC_NAME
+  namespace: $OPERATOR_NS
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 200Mi
+EOF
+)
+  confirm_run_stdin "$manifest" "PersistentVolumeClaim to create:" oc apply -f -
+}
+
+# Build a JSON-patch array for the CSV given the components to mount.
+build_csv_patch() {
+  local csv_json="$1" comps_json="$2"
+  local base="/spec/install/spec/deployments/0/spec"
+
+  echo "$csv_json" | jq -c \
+    --argjson comps "$comps_json" \
+    --arg vol "$VOLUME_NAME" \
+    --arg pvc "$PVC_NAME" \
+    --arg base "$base" \
+    '
+    .spec.install.spec.deployments[0].spec as $spec
+    | $spec.template.spec as $pod
+    | $pod.containers[0] as $container
+    | ($container.volumeMounts // null) as $mounts
+    | ($pod.volumes // null) as $volumes
+    | {
+        dashboard: "/opt/manifests/dashboard",
+        modelcontroller: "/opt/manifests/modelcontroller"
+      } as $paths
+    | [
+        # replicas must be 1 so the PVC (ReadWriteOnce) can mount
+        (if ($spec.replicas // 1) != 1
+         then {op: "replace", path: ($base + "/replicas"), value: 1}
+         else empty end),
+
+        # Recreate avoids two pods contending for the RWO volume
+        (if ($spec.strategy.type // "") != "Recreate"
+         then {op: "add", path: ($base + "/strategy"), value: {type: "Recreate"}}
+         else empty end),
+
+        # fsGroup so the operator user can read the mounted manifests
+        (if ($pod.securityContext.fsGroup // null) != 1001
+         then (if $pod.securityContext == null
+               then {op: "add", path: ($base + "/template/spec/securityContext"), value: {fsGroup: 1001}}
+               else {op: "add", path: ($base + "/template/spec/securityContext/fsGroup"), value: 1001}
+               end)
+         else empty end),
+
+        # the shared PVC volume
+        (if $volumes == null
+         then {op: "add", path: ($base + "/template/spec/volumes"),
+               value: [{name: $vol, persistentVolumeClaim: {claimName: $pvc}}]}
+         elif ([$volumes[] | select(.name == $vol)] | length) == 0
+         then {op: "add", path: ($base + "/template/spec/volumes/-"),
+               value: {name: $vol, persistentVolumeClaim: {claimName: $pvc}}}
+         else empty end),
+
+        # one subPath mount per component
+        ($comps[]
+         | . as $c
+         | select(($mounts // []) | map(select(.name == $vol and .subPath == $c)) | length == 0)
+         | if $mounts == null
+           then {op: "add", path: ($base + "/template/spec/containers/0/volumeMounts"),
+                 value: [{name: $vol, mountPath: $paths[$c], subPath: $c}]}
+           else {op: "add", path: ($base + "/template/spec/containers/0/volumeMounts/-"),
+                 value: {name: $vol, mountPath: $paths[$c], subPath: $c}}
+           end)
+      ]
+    '
+}
+
+cmd_setup() {
+  local comps=("$@")
+  [ ${#comps[@]} -eq 0 ] && comps=("dashboard")
+
+  local c
+  for c in "${comps[@]}"; do validate_component "$c"; done
+
+  ensure_pvc
+
+  local csv csv_json comps_json patch
+  csv="$(find_csv)"
+  [ -n "$csv" ] || die "no opendatahub-operator CSV found in $OPERATOR_NS"
+
+  csv_json=$(oc get csv "$csv" -n "$OPERATOR_NS" -o json)
+  comps_json=$(printf '%s\n' "${comps[@]}" | jq -R . | jq -sc .)
+  patch=$(build_csv_patch "$csv_json" "$comps_json")
+
+  if [ "$patch" = "[]" ]; then
+    info "CSV already has all required patches"
+  else
+    info "Patching CSV $csv"
+    if [ "$ASSUME_YES" != true ]; then
+      echo "" >&2
+      echo "${C_BOLD}JSON patch operations:${C_RESET}" >&2
+      echo "$patch" | jq . | sed 's/^/  /' >&2
+    fi
+    confirm_run oc patch csv "$csv" -n "$OPERATOR_NS" --type json -p "$patch"
+  fi
+
+  wait_for_operator
+  ok "Operator running with mounts for: ${comps[*]}"
+}
+
+# ---------------------------------------------------------------------------
+# Copy manifests
+# ---------------------------------------------------------------------------
+
+copy_dashboard_manifests() {
+  local tag="$1" pod="$2" tmp mod_params key_val key
+
+  [ -d "$ODH_DIR/manifests" ] || die "dashboard manifests not found at $ODH_DIR/manifests"
+
+  tmp=$(mktemp -d)
+  trap 'rm -rf "$tmp"' RETURN
+  cp -r "$ODH_DIR/manifests/." "$tmp/"
+
+  # Core dashboard images
+  sed -i.bak "s|^odh-dashboard-image=.*|odh-dashboard-image=quay.io/${DASHBOARD_REPO}:${tag}|" "$tmp/odh/params.env"
+  sed -i.bak "s|^core-bff-image=.*|core-bff-image=quay.io/opendatahub/odh-core-bff:${tag}|" "$tmp/odh/params.env"
+
+  # Module UI images in the combined sidecar file
+  for key_val in \
+    "model-registry-ui-image=quay.io/opendatahub/odh-mod-arch-modular-architecture:${tag}" \
+    "gen-ai-ui-image=quay.io/opendatahub/odh-mod-arch-gen-ai:${tag}" \
+    "maas-ui-image=quay.io/opendatahub/mod-arch-maas:${tag}" \
+    "mlflow-ui-image=quay.io/opendatahub/odh-mod-arch-mlflow:${tag}" \
+    "eval-hub-ui-image=quay.io/opendatahub/odh-mod-arch-eval-hub:${tag}" \
+    "automl-ui-image=quay.io/opendatahub/odh-mod-arch-automl:${tag}" \
+    "autorag-ui-image=quay.io/opendatahub/odh-mod-arch-autorag:${tag}" \
+    "agent-ops-ui-image=quay.io/opendatahub/odh-mod-arch-agent-ops:${tag}"; do
+    key="${key_val%%=*}"
+    sed -i.bak "s|^${key}=.*|${key_val}|" "$tmp/sidecar/params.env"
+  done
+
+  # Per-module params.env files, preserving each image's repo
+  for mod_params in "$tmp"/modules/*/params.env; do
+    [ -f "$mod_params" ] || continue
+    sed -i.bak -E "s|(^[a-z-]+-ui-image=quay\.io/[^:]+):.*|\1:${tag}|" "$mod_params"
+  done
+
+  find "$tmp" -name '*.bak' -delete
+
+  info "Copying dashboard manifests (tag: $tag) to $pod"
+  if [ "$ASSUME_YES" != true ]; then
+    echo "" >&2
+    echo "${C_BOLD}Image overrides to be written:${C_RESET}" >&2
+    grep -rhE '^[a-z-]+(-image|-ui-image|-bff-image)=' "$tmp/odh/params.env" "$tmp/sidecar/params.env" 2>/dev/null \
+      | sed 's/^/  /' >&2
+  fi
+  confirm_run oc cp "$tmp/." "$OPERATOR_NS/$pod:/opt/manifests/dashboard"
+}
+
+copy_modelcontroller_manifests() {
+  local tag="$1" pod="$2" tmp
+
+  tmp=$(mktemp -d)
+  trap 'rm -rf "$tmp"' RETURN
+
+  info "Cloning odh-model-controller config"
+  git clone --depth 1 --filter=blob:none --sparse \
+    https://github.com/opendatahub-io/odh-model-controller.git "$tmp/repo" >/dev/null 2>&1 \
+    || die "failed to clone odh-model-controller"
+  git -C "$tmp/repo" sparse-checkout set config >/dev/null 2>&1
+
+  if [ -n "$tag" ]; then
+    sed -i.bak "s|^odh-model-serving-api=.*|odh-model-serving-api=quay.io/${MODELCONTROLLER_REPO}:${tag}|" \
+      "$tmp/repo/config/base/params.env"
+    find "$tmp" -name '*.bak' -delete
+    info "Set odh-model-serving-api to tag: $tag"
+  else
+    info "Using upstream default images for modelcontroller"
+  fi
+
+  info "Copying modelcontroller manifests to $pod"
+  if [ "$ASSUME_YES" != true ] && [ -f "$tmp/repo/config/base/params.env" ]; then
+    echo "" >&2
+    echo "${C_BOLD}Image overrides to be written:${C_RESET}" >&2
+    sed 's/^/  /' "$tmp/repo/config/base/params.env" >&2
+  fi
+  confirm_run oc cp "$tmp/repo/config/." "$OPERATOR_NS/$pod:/opt/manifests/modelcontroller"
+}
+
+cmd_copy() {
+  local component="${1:-}" tag="${2:-}"
+  [ -n "$component" ] || die "usage: odh-manifests copy <component> [tag]"
+  validate_component "$component"
+
+  local pod
+  pod="$(find_operator_pod)"
+  [ -n "$pod" ] || die "no operator pod running — run 'odh-manifests setup' first"
+
+  case "$component" in
+    dashboard)
+      [ -n "$tag" ] || die "tag is required for the dashboard component"
+      copy_dashboard_manifests "$tag" "$pod"
+      ;;
+    modelcontroller)
+      copy_modelcontroller_manifests "$tag" "$pod"
+      ;;
+  esac
+
+  info "Restarting operator to pick up new manifests"
+  confirm_run oc rollout restart deploy -n "$OPERATOR_NS" -l name=opendatahub-operator
+  wait_for_operator
+  ok "Manifests copied and operator restarted"
+}
+
+# ---------------------------------------------------------------------------
+# Rollout monitoring
+# ---------------------------------------------------------------------------
+
+watch_rollout() {
+  local deploy="$1" timeout="${2:-300s}"
+  info "Watching rollout of $deploy"
+  if oc rollout status "deployment/$deploy" -n "$DASHBOARD_NS" --timeout="$timeout"; then
+    ok "$deploy rolled out"
+    return 0
+  fi
+  warn "$deploy rollout did not complete within $timeout"
+  echo "" >&2
+  echo "${C_BOLD}Recent events:${C_RESET}" >&2
+  oc get events -n "$DASHBOARD_NS" --sort-by=.lastTimestamp 2>/dev/null | tail -15 >&2
+  echo "" >&2
+  echo "${C_BOLD}Pod status:${C_RESET}" >&2
+  oc get pods -n "$DASHBOARD_NS" -l "app=$deploy" 2>/dev/null >&2 || true
+  echo "" >&2
+  warn "A common cause is CPU pressure — consider deleting unused InferenceServices"
+  return 1
+}
+
+# ---------------------------------------------------------------------------
+# Commands
+# ---------------------------------------------------------------------------
+
+cmd_status() {
+  local s
+  s="$(gather_status)"
+  if [ "${1:-}" = "--json" ]; then
+    echo "$s"
+  else
+    print_status "$s"
+  fi
+}
+
+cmd_update() {
+  info "Restarting $DASHBOARD_DEPLOY to pull the latest images for its current tag"
+  confirm_run oc rollout restart "deployment/$DASHBOARD_DEPLOY" -n "$DASHBOARD_NS"
+  watch_rollout "$DASHBOARD_DEPLOY"
+}
+
+cmd_switch() {
+  local component="${1:-dashboard}" tag="${2:-}"
+  validate_component "$component"
+  [ -n "$tag" ] || tag="$(prompt_for_tag "$component")"
+
+  cmd_copy "$component" "$tag"
+
+  case "$component" in
+    dashboard)       watch_rollout "$DASHBOARD_DEPLOY" ;;
+    modelcontroller) watch_rollout "model-serving-api" ;;
+  esac
+}
+
+cmd_revert() {
+  info "Scaling operator to 0"
+  confirm_run oc scale "deployment/$OPERATOR_DEPLOY" -n "$OPERATOR_NS" --replicas=0
+
+  local csv cleaned
+  csv="$(find_csv)"
+  if [ -n "$csv" ]; then
+    info "Cleaning CSV $csv"
+    cleaned=$(oc get csv "$csv" -n "$OPERATOR_NS" -o json \
+      | jq --arg vol "$VOLUME_NAME" '
+          .spec.install.spec.deployments[0].spec |= (
+            del(.strategy)
+            | .replicas = 0
+            | .template.spec |= (
+                (if .securityContext then .securityContext |= del(.fsGroup) else . end)
+                | (if .securityContext == {} then del(.securityContext) else . end)
+                | .containers[0].volumeMounts |= (map(select(.name != $vol)))
+                | (if .volumes then .volumes |= (map(select(.name != $vol))) else . end)
+              )
+          )')
+    if [ "$ASSUME_YES" != true ]; then
+      echo "" >&2
+      echo "${C_BOLD}Resulting operator deployment spec:${C_RESET}" >&2
+      echo "$cleaned" | jq '.spec.install.spec.deployments[0].spec
+        | {replicas, strategy, securityContext: .template.spec.securityContext,
+           volumes: .template.spec.volumes,
+           volumeMounts: .template.spec.containers[0].volumeMounts}' | sed 's/^/  /' >&2
+    fi
+    confirm_run_stdin "$cleaned" "" oc replace -f -
+    ok "CSV cleaned"
+  else
+    warn "No opendatahub-operator CSV found, skipping CSV cleanup"
+  fi
+
+  info "Deleting PVC $PVC_NAME"
+  confirm_run oc delete pvc "$PVC_NAME" -n "$OPERATOR_NS" --ignore-not-found
+
+  ok "Revert complete — operator scaled to 0, custom manifests removed"
+  info "Deployments keep running with their last-applied images"
+}
+
+cmd_tags() {
+  local repo="${1:-$DASHBOARD_REPO}"
+  quay_tags "$repo" | column -t -s$'\t' 2>/dev/null || quay_tags "$repo"
+}
+
+# ---------------------------------------------------------------------------
+# Interactive mode
+# ---------------------------------------------------------------------------
+
+interactive() {
+  local s
+  s="$(gather_status)"
+  print_status "$s"
+
+  confirm "Is this the right cluster?" || die "aborted"
+
+  local pvc count has_dashboard image_current
+  pvc=$(echo "$s" | jq -r '.pvc_exists')
+  count=$(echo "$s" | jq -r '.overridden_components | length')
+  image_current=$(echo "$s" | jq -r '.image_current')
+  has_dashboard=false
+  echo "$s" | jq -e '.overridden_components | index("dashboard")' >/dev/null 2>&1 && has_dashboard=true
+
+  echo ""
+  echo "${C_BOLD}Actions${C_RESET}"
+
+  local actions=() labels=() n=1
+  if [ "$pvc" != true ] || [ "$count" = "0" ]; then
+    actions+=("setup"); labels+=("Set up custom manifests")
+  fi
+  if [ "$has_dashboard" = true ]; then
+    if [ "$image_current" = false ]; then
+      actions+=("update"); labels+=("Update dashboard images ${C_YELLOW}(outdated)${C_RESET}")
+    else
+      actions+=("update"); labels+=("Update dashboard images")
+    fi
+    actions+=("switch"); labels+=("Switch dashboard tag")
+  fi
+  actions+=("manage"); labels+=("Manage another component")
+  if [ "$pvc" = true ]; then
+    actions+=("revert"); labels+=("Revert everything")
+  fi
+  actions+=("quit"); labels+=("Do nothing")
+
+  local i
+  for i in $(seq 0 $((${#actions[@]} - 1))); do
+    printf '  %d) %b\n' "$n" "${labels[$i]}"
+    n=$((n + 1))
+  done
+
+  echo ""
+  local choice
+  read -r -p "Choose: " choice </dev/tty
+  echo "$choice" | grep -qE '^[0-9]+$' || die "invalid choice"
+  [ "$choice" -ge 1 ] && [ "$choice" -le "${#actions[@]}" ] || die "invalid choice"
+
+  case "${actions[$((choice - 1))]}" in
+    setup)  interactive_setup ;;
+    update) cmd_update ;;
+    switch) cmd_switch dashboard ;;
+    manage) interactive_manage ;;
+    revert)
+      echo ""
+      echo "This will scale the operator to 0, clean the CSV, and delete the PVC."
+      confirm "Proceed with revert?" && cmd_revert || info "Cancelled"
+      ;;
+    quit)   info "Nothing to do" ;;
+  esac
+}
+
+interactive_setup() {
+  echo ""
+  echo "${C_BOLD}Which components?${C_RESET}"
+  echo "  1) dashboard"
+  echo "  2) modelcontroller"
+  echo "  3) both"
+  echo ""
+  local choice comps=()
+  read -r -p "Choose: " choice </dev/tty
+  case "$choice" in
+    1) comps=(dashboard) ;;
+    2) comps=(modelcontroller) ;;
+    3) comps=(dashboard modelcontroller) ;;
+    *) die "invalid choice" ;;
+  esac
+
+  local dashboard_tag="" mc_tag=""
+  case " ${comps[*]} " in *" dashboard "*)
+    echo ""
+    if confirm "Use tag 'main' for dashboard?"; then
+      dashboard_tag=main
+    else
+      dashboard_tag="$(prompt_for_tag dashboard)"
+    fi
+  ;; esac
+  case " ${comps[*]} " in *" modelcontroller "*)
+    echo ""
+    if confirm "Use upstream default images for modelcontroller?"; then
+      mc_tag=""
+    else
+      mc_tag="$(prompt_for_tag modelcontroller)"
+    fi
+  ;; esac
+
+  echo ""
+  echo "${C_BOLD}Plan${C_RESET}"
+  echo "  1. Ensure PVC $PVC_NAME exists in $OPERATOR_NS"
+  echo "  2. Patch CSV with mounts for: ${comps[*]}"
+  echo "  3. Wait for the operator pod"
+  echo "  4. Copy manifests${dashboard_tag:+ (dashboard: $dashboard_tag)}${mc_tag:+ (modelcontroller: $mc_tag)}"
+  echo "  5. Restart the operator and watch rollouts"
+  echo ""
+  confirm "Proceed?" || { info "Cancelled"; return; }
+
+  cmd_setup "${comps[@]}"
+
+  local c
+  for c in "${comps[@]}"; do
+    case "$c" in
+      dashboard)       cmd_copy dashboard "$dashboard_tag" ;;
+      modelcontroller) cmd_copy modelcontroller "$mc_tag" ;;
+    esac
+  done
+
+  case " ${comps[*]} " in *" dashboard "*) watch_rollout "$DASHBOARD_DEPLOY" || true ;; esac
+  case " ${comps[*]} " in *" modelcontroller "*) watch_rollout "model-serving-api" || true ;; esac
+
+  echo ""
+  print_status "$(gather_status)"
+}
+
+interactive_manage() {
+  echo ""
+  echo "${C_BOLD}Which component?${C_RESET}"
+  echo "  1) dashboard"
+  echo "  2) modelcontroller"
+  echo ""
+  local choice comp tag
+  read -r -p "Choose: " choice </dev/tty
+  case "$choice" in
+    1) comp=dashboard ;;
+    2) comp=modelcontroller ;;
+    *) die "invalid choice" ;;
+  esac
+
+  if [ "$comp" = dashboard ]; then
+    tag="$(prompt_for_tag dashboard)"
+  else
+    if confirm "Use upstream default images?"; then tag=""; else tag="$(prompt_for_tag modelcontroller)"; fi
+  fi
+
+  cmd_setup "$comp"
+  cmd_copy "$comp" "$tag"
+  case "$comp" in
+    dashboard)       watch_rollout "$DASHBOARD_DEPLOY" || true ;;
+    modelcontroller) watch_rollout "model-serving-api" || true ;;
+  esac
+
+  echo ""
+  print_status "$(gather_status)"
+}
+
+# ---------------------------------------------------------------------------
+# Usage and dispatch
+# ---------------------------------------------------------------------------
+
+usage() {
+  cat <<EOF
+${C_BOLD}odh-manifests${C_RESET} — manage custom volume-mounted ODH component manifests
+
+${C_BOLD}USAGE${C_RESET}
+  odh-manifests                          Interactive menu
+  odh-manifests status [--json]          Show current state
+  odh-manifests setup [component...]     Create PVC and patch CSV (default: dashboard)
+  odh-manifests copy <component> [tag]   Copy manifests into the operator pod
+  odh-manifests switch <component> [tag] Copy manifests and watch the rollout
+  odh-manifests update                   Restart dashboard to pull the latest images
+  odh-manifests revert                   Tear down the custom setup
+  odh-manifests tags [repo]              List recent quay tags
+
+${C_BOLD}FLAGS${C_RESET}
+  -y, --yes         Skip the approval prompt before each cluster write
+
+${C_BOLD}COMPONENTS${C_RESET}
+  dashboard         odh-dashboard and all module sidecars
+  modelcontroller   model-serving-api and odh-model-controller
+
+${C_BOLD}SAFETY${C_RESET}
+  Every command that writes to the cluster (apply, patch, replace, scale,
+  delete, cp, rollout restart) prints the exact command — and the payload it
+  would send — then waits for approval. Reads run without prompting.
+
+${C_BOLD}EXAMPLES${C_RESET}
+  odh-manifests setup dashboard
+  odh-manifests switch dashboard main
+  odh-manifests switch modelcontroller odh-pr-864
+  odh-manifests tags opendatahub/odh-model-serving-api
+  odh-manifests status --json | jq .overridden_components
+
+The PVC is '$PVC_NAME' in '$OPERATOR_NS', shared by all
+components via subPath mounts.
+EOF
+}
+
+main() {
+  # Global flags may appear before or after the subcommand.
+  local args=() a
+  for a in "$@"; do
+    case "$a" in
+      -y|--yes) ASSUME_YES=true ;;
+      *)        args+=("$a") ;;
+    esac
+  done
+  set -- ${args[@]+"${args[@]}"}
+
+  case "${1:-}" in
+    -h|--help|help) usage; exit 0 ;;
+  esac
+
+  require_deps
+  require_cluster
+
+  local cmd="${1:-}"
+  [ $# -gt 0 ] && shift
+
+  case "$cmd" in
+    "")       interactive ;;
+    status)   cmd_status "$@" ;;
+    setup)    cmd_setup "$@" ;;
+    copy)     cmd_copy "$@" ;;
+    switch)   cmd_switch "$@" ;;
+    update)   cmd_update "$@" ;;
+    revert)   cmd_revert "$@" ;;
+    tags)     cmd_tags "$@" ;;
+    *)        die "unknown command '$cmd' (run 'odh-manifests --help')" ;;
+  esac
+}
+
+main "$@"

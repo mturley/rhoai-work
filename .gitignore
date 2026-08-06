@@ -2,6 +2,7 @@
 .worktrees/
 opendatahub-io/
 kubeflow/
+gitlab-cee/
 *team*home*/
 360-starter-kit/
 feature-context/

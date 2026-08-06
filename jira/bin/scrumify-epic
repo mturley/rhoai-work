@@ -1,0 +1,435 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+for cmd in curl jq yq; do
+  command -v "$cmd" >/dev/null 2>&1 || { echo "Error: $cmd is required. Install with: brew install $cmd" >&2; exit 1; }
+done
+
+# Resolve real path (macOS readlink doesn't support -f)
+resolve_path() {
+  local target="$1"
+  while [[ -L "$target" ]]; do
+    local dir="$(cd "$(dirname "$target")" && pwd)"
+    target="$(readlink "$target")"
+    [[ "$target" != /* ]] && target="$dir/$target"
+  done
+  cd "$(dirname "$target")" && pwd
+}
+
+SCRIPT_DIR="$(resolve_path "$0")"
+CONFIG="$SCRIPT_DIR/../jira-fields.yaml"
+JIRA_LABELS="$SCRIPT_DIR/jira-labels"
+
+if [[ ! -f "$CONFIG" ]]; then
+  echo "Error: Config not found at $CONFIG" >&2
+  exit 1
+fi
+
+# --- Auth ---
+if [[ -z "${JIRA_EMAIL:-}" || -z "${JIRA_TOKEN:-}" || -z "${JIRA_HOST:-}" ]]; then
+  if [[ -f "$HOME/secrets/jira.env" ]]; then
+    source "$HOME/secrets/jira.env"
+  else
+    echo "Error: JIRA_EMAIL, JIRA_TOKEN, and JIRA_HOST must be set." >&2
+    echo "Either export them or create ~/secrets/jira.env with:" >&2
+    echo "  JIRA_EMAIL=you@example.com" >&2
+    echo "  JIRA_TOKEN=your-api-token" >&2
+    echo "  JIRA_HOST=your-instance.atlassian.net" >&2
+    exit 1
+  fi
+fi
+for var in JIRA_EMAIL JIRA_TOKEN JIRA_HOST; do
+  eval "val=\${$var:-}"
+  if [[ -z "$val" ]]; then
+    echo "Error: $var is not set (check ~/secrets/jira.env)" >&2
+    exit 1
+  fi
+done
+
+AUTH="Authorization: Basic $(echo -n "${JIRA_EMAIL}:${JIRA_TOKEN}" | base64)"
+BASE_URL="https://${JIRA_HOST}"
+
+# --- Load config ---
+COMPONENT=$(yq -r '.project.component' "$CONFIG")
+TEAM_FIELD=$(yq -r '.custom_fields.team' "$CONFIG")
+ACTIVITY_TYPE_FIELD=$(yq -r '.custom_fields.activity_type' "$CONFIG")
+NEW_FEATURES_ID=$(yq -r '.activity_types.new_features' "$CONFIG")
+
+# --- Input ---
+usage() {
+  echo "Usage: scrumify-epic <ISSUE_KEY_OR_URL>" >&2
+  echo "  e.g. scrumify-epic RHOAIENG-79961" >&2
+  echo "  e.g. scrumify-epic https://redhat.atlassian.net/browse/RHOAIENG-79961" >&2
+  exit 1
+}
+
+[[ $# -lt 1 ]] && usage
+
+INPUT="$1"
+if echo "$INPUT" | grep -qE '^https?://'; then
+  ISSUE_KEY=$(echo "$INPUT" | grep -oE '[A-Z]+-[0-9]+' | tail -1)
+  if [[ -z "$ISSUE_KEY" ]]; then
+    echo "Error: Could not extract issue key from URL: $INPUT" >&2
+    exit 1
+  fi
+else
+  ISSUE_KEY="$INPUT"
+fi
+
+# --- API helpers ---
+jira_get() {
+  curl -sf "$BASE_URL$1" -H "$AUTH" -H "Accept: application/json"
+}
+
+jira_post() {
+  curl -sf "$BASE_URL$1" -H "$AUTH" -H "Accept: application/json" -H "Content-Type: application/json" -d "$2"
+}
+
+jira_put() {
+  curl -sf -X PUT "$BASE_URL$1" -H "$AUTH" -H "Accept: application/json" -H "Content-Type: application/json" -d "$2" -o /dev/null -w "%{http_code}"
+}
+
+jira_search() {
+  local jql="$1" fields="$2"
+  jira_post "/rest/api/3/search/jql" "{\"jql\": $(echo "$jql" | jq -Rs .), \"maxResults\": 100, \"fields\": $fields}"
+}
+
+# --- Fetch issue ---
+echo "Fetching $ISSUE_KEY..."
+ISSUE_JSON=$(jira_get "/rest/api/3/issue/$ISSUE_KEY?fields=summary,issuetype,components,labels,$TEAM_FIELD,$ACTIVITY_TYPE_FIELD") || {
+  echo "Error: Could not fetch $ISSUE_KEY. Check the key and your credentials." >&2
+  exit 1
+}
+
+SUMMARY=$(echo "$ISSUE_JSON" | jq -r '.fields.summary')
+ISSUE_TYPE=$(echo "$ISSUE_JSON" | jq -r '.fields.issuetype.name')
+echo "  $ISSUE_KEY ($ISSUE_TYPE): $SUMMARY"
+echo ""
+
+# --- Collect descendants ---
+FIELDS='["summary","issuetype","components","labels","'"$TEAM_FIELD"'","'"$ACTIVITY_TYPE_FIELD"'"]'
+ALL_ISSUES="[]"
+
+add_issue() {
+  ALL_ISSUES=$(echo "$ALL_ISSUES" | jq --argjson issue "$1" '. + [$issue]')
+}
+
+add_issue "$ISSUE_JSON"
+
+if [[ "$ISSUE_TYPE" == "Epic" ]]; then
+  echo "Searching for child issues..."
+  CHILDREN_JSON=$(jira_search "\"Epic Link\" = $ISSUE_KEY ORDER BY key ASC" "$FIELDS") || true
+  CHILD_KEYS=""
+  if [[ -n "$CHILDREN_JSON" ]]; then
+    while IFS= read -r issue; do
+      [[ -z "$issue" ]] && continue
+      add_issue "$issue"
+      key=$(echo "$issue" | jq -r '.key')
+      if [[ -n "$CHILD_KEYS" ]]; then
+        CHILD_KEYS="$CHILD_KEYS, $key"
+      else
+        CHILD_KEYS="$key"
+      fi
+    done <<EOF
+$(echo "$CHILDREN_JSON" | jq -c '.issues[]')
+EOF
+  fi
+
+  if [[ -n "$CHILD_KEYS" ]]; then
+    echo "Searching for subtasks..."
+    SUBTASKS_JSON=$(jira_search "parent IN ($CHILD_KEYS) ORDER BY key ASC" "$FIELDS") || true
+    if [[ -n "$SUBTASKS_JSON" ]]; then
+      while IFS= read -r issue; do
+        [[ -z "$issue" ]] && continue
+        add_issue "$issue"
+      done <<EOF
+$(echo "$SUBTASKS_JSON" | jq -c '.issues[]')
+EOF
+    fi
+  fi
+elif [[ "$ISSUE_TYPE" != "Sub-task" ]]; then
+  echo "Searching for subtasks..."
+  SUBTASKS_JSON=$(jira_search "parent = $ISSUE_KEY ORDER BY key ASC" "$FIELDS") || true
+  if [[ -n "$SUBTASKS_JSON" ]]; then
+    while IFS= read -r issue; do
+      [[ -z "$issue" ]] && continue
+      add_issue "$issue"
+    done <<EOF
+$(echo "$SUBTASKS_JSON" | jq -c '.issues[]')
+EOF
+  fi
+fi
+
+TOTAL=$(echo "$ALL_ISSUES" | jq length)
+echo "Found $TOTAL issue(s) total."
+echo ""
+
+# --- Select scrum team ---
+echo "Fetching available scrum teams..."
+SCRUM_LABELS=()
+while IFS= read -r label; do
+  [[ -n "$label" ]] && SCRUM_LABELS+=("$label")
+done <<EOF
+$("$JIRA_LABELS" scrum 2>/dev/null || echo "dashboard-zaffre-scrum")
+EOF
+if [[ ${#SCRUM_LABELS[@]} -eq 0 ]]; then
+  SCRUM_LABELS=("dashboard-zaffre-scrum")
+fi
+
+echo "Select scrum team:"
+PS3="Choice [default: dashboard-zaffre-scrum]: "
+select SCRUM_LABEL in "${SCRUM_LABELS[@]}"; do
+  if [[ -z "$SCRUM_LABEL" && -z "$REPLY" ]]; then
+    SCRUM_LABEL="dashboard-zaffre-scrum"
+    break
+  elif [[ -n "$SCRUM_LABEL" ]]; then
+    break
+  else
+    echo "Invalid selection. Try again."
+  fi
+done
+echo "  Selected: $SCRUM_LABEL"
+
+TEAM_UUID=$(yq -r ".scrum_teams.\"$SCRUM_LABEL\".uuid" "$CONFIG")
+TEAM_NAME=$(yq -r ".scrum_teams.\"$SCRUM_LABEL\".name" "$CONFIG")
+[[ "$TEAM_UUID" == "null" ]] && TEAM_UUID=""
+[[ "$TEAM_NAME" == "null" ]] && TEAM_NAME=""
+if [[ -z "$TEAM_UUID" ]]; then
+  echo "  Warning: No UUID found for $SCRUM_LABEL in config. Team field will not be set." >&2
+  TEAM_NAME="$SCRUM_LABEL (unknown UUID)"
+fi
+echo ""
+
+# --- Select area labels ---
+echo "Fetching available area labels..."
+AREA_LABELS=()
+while IFS= read -r label; do
+  [[ -n "$label" ]] && AREA_LABELS+=("$label")
+done <<EOF
+$("$JIRA_LABELS" area 2>/dev/null || echo "dashboard-area-model-serving")
+EOF
+if [[ ${#AREA_LABELS[@]} -eq 0 ]]; then
+  AREA_LABELS=("dashboard-area-model-serving")
+fi
+
+# Track selection state with a parallel array (bash 3.2 compatible)
+AREA_SELECTED=()
+for i in "${!AREA_LABELS[@]}"; do
+  if [[ "${AREA_LABELS[$i]}" == "dashboard-area-model-serving" ]]; then
+    AREA_SELECTED+=("1")
+  else
+    AREA_SELECTED+=("0")
+  fi
+done
+
+while true; do
+  echo "Area labels (toggle numbers, Enter when done):"
+  for i in "${!AREA_LABELS[@]}"; do
+    if [[ "${AREA_SELECTED[$i]}" -eq 1 ]]; then
+      marker="[*]"
+    else
+      marker="[ ]"
+    fi
+    printf "  %2d) %s %s\n" "$((i + 1))" "${AREA_LABELS[$i]}" "$marker"
+  done
+  printf "Toggle> "
+  read -r toggle_input
+  if [[ -z "$toggle_input" ]]; then
+    break
+  fi
+  for num in $toggle_input; do
+    if echo "$num" | grep -qE '^[0-9]+$'; then
+      if [[ "$num" -ge 1 && "$num" -le ${#AREA_LABELS[@]} ]]; then
+        idx=$((num - 1))
+        if [[ "${AREA_SELECTED[$idx]}" -eq 1 ]]; then
+          AREA_SELECTED[$idx]="0"
+        else
+          AREA_SELECTED[$idx]="1"
+        fi
+      fi
+    fi
+  done
+done
+
+SELECTED_AREAS=()
+for i in "${!AREA_LABELS[@]}"; do
+  if [[ "${AREA_SELECTED[$i]}" -eq 1 ]]; then
+    SELECTED_AREAS+=("${AREA_LABELS[$i]}")
+  fi
+done
+echo "  Selected: ${SELECTED_AREAS[*]:-none}"
+echo ""
+
+# --- Activity type ---
+printf "Set Activity Type to 'New Features'? [Y/n] "
+read -r activity_answer
+SET_ACTIVITY=true
+if echo "$activity_answer" | grep -qE '^[Nn]'; then
+  SET_ACTIVITY=false
+fi
+echo ""
+
+# --- CLONE renaming ---
+FEATURE_NAME=""
+HAS_CLONE=false
+
+while IFS= read -r key_summary; do
+  [[ -z "$key_summary" ]] && continue
+  key=$(echo "$key_summary" | cut -d'|' -f1)
+  summary=$(echo "$key_summary" | cut -d'|' -f2-)
+  if echo "$summary" | grep -q '^CLONE - '; then
+    if [[ "$HAS_CLONE" == false ]]; then
+      echo "Issues with CLONE prefix found:"
+      HAS_CLONE=true
+    fi
+    echo "  $key: $summary"
+  fi
+done <<EOF
+$(echo "$ALL_ISSUES" | jq -r '.[] | "\(.key)|\(.fields.summary)"')
+EOF
+
+if [[ "$HAS_CLONE" == true ]]; then
+  echo ""
+  printf "Short feature name prefix (for template issues with a placeholder): "
+  read -r FEATURE_NAME
+  echo ""
+fi
+
+rename_summary() {
+  local summary="$1" name="$2"
+  if [[ -z "$name" ]]; then
+    echo "$summary"
+    return
+  fi
+  summary="${summary/CLONE - \[<Feature Name>\]- /$name - }"
+  summary="${summary/CLONE - \[<Feature Name>\] - /$name - }"
+  summary="${summary/#CLONE - /$name - }"
+  echo "$summary"
+}
+
+# --- Preview ---
+echo "============================================================"
+echo "PREVIEW OF CHANGES"
+echo "============================================================"
+printf "%-18s %-10s %-30s %-20s\n" "Key" "Type" "Component" "Team"
+echo "------------------------------------------------------------"
+
+while IFS= read -r issue_json; do
+  [[ -z "$issue_json" ]] && continue
+  key=$(echo "$issue_json" | jq -r '.key')
+  itype=$(echo "$issue_json" | jq -r '.fields.issuetype.name')
+  summary=$(echo "$issue_json" | jq -r '.fields.summary')
+  cur_comp=$(echo "$issue_json" | jq -r '[.fields.components[]?.name] | first // empty')
+  cur_team=$(echo "$issue_json" | jq -r ".fields.$TEAM_FIELD.name // empty")
+  cur_activity=$(echo "$issue_json" | jq -r ".fields.$ACTIVITY_TYPE_FIELD.value // empty")
+  cur_labels=$(echo "$issue_json" | jq -r '.fields.labels // [] | join(", ")')
+
+  comp_change="$COMPONENT"
+  [[ "$cur_comp" == "$COMPONENT" ]] && comp_change="(already set)"
+
+  if [[ "$itype" == "Sub-task" ]]; then
+    team_change="(inherits)"
+  elif [[ -n "$TEAM_UUID" ]]; then
+    team_change="$TEAM_NAME"
+    [[ "$cur_team" == "$TEAM_NAME" ]] && team_change="(already set)"
+  else
+    team_change="(skipped)"
+  fi
+
+  new_summary=$(rename_summary "$summary" "$FEATURE_NAME")
+  summary_change=""
+  if [[ "$new_summary" != "$summary" ]]; then
+    summary_change="  Summary: $summary -> $new_summary"
+  fi
+
+  labels_to_add=""
+  for lbl in "$SCRUM_LABEL" "${SELECTED_AREAS[@]}"; do
+    if ! echo "$cur_labels" | grep -q "$lbl"; then
+      labels_to_add="$labels_to_add $lbl"
+    fi
+  done
+
+  activity_change=""
+  if [[ "$SET_ACTIVITY" == true ]]; then
+    if [[ "$itype" == "Sub-task" ]]; then
+      activity_change="n/a (subtask)"
+    elif [[ "$cur_activity" == "New Features" ]]; then
+      activity_change="(already set)"
+    else
+      activity_change="-> New Features"
+    fi
+  fi
+
+  printf "%-18s %-10s %-30s %-20s\n" "$key" "$itype" "$comp_change" "$team_change"
+  if [[ -n "$summary_change" ]]; then
+    echo "$summary_change"
+  fi
+  if [[ -n "${labels_to_add## }" ]]; then
+    echo "  Labels: +${labels_to_add## }"
+  fi
+  if [[ -n "$activity_change" && "$activity_change" != "(already set)" && "$activity_change" != "n/a (subtask)" ]]; then
+    echo "  Activity Type: $activity_change"
+  fi
+done <<EOF
+$(echo "$ALL_ISSUES" | jq -c '.[]')
+EOF
+
+echo "============================================================"
+echo ""
+printf "Apply these changes? [y/N] "
+read -r confirm
+if ! echo "$confirm" | grep -qE '^[Yy]'; then
+  echo "Aborted."
+  exit 0
+fi
+echo ""
+
+# --- Apply ---
+SUCCESS=0
+FAIL=0
+
+while IFS= read -r issue_json; do
+  [[ -z "$issue_json" ]] && continue
+  key=$(echo "$issue_json" | jq -r '.key')
+  itype=$(echo "$issue_json" | jq -r '.fields.issuetype.name')
+  summary=$(echo "$issue_json" | jq -r '.fields.summary')
+  existing_labels=$(echo "$issue_json" | jq '.fields.labels // []')
+
+  new_labels=$(echo "$existing_labels" | jq --arg s "$SCRUM_LABEL" '. + [$s] | unique')
+  for area in "${SELECTED_AREAS[@]}"; do
+    new_labels=$(echo "$new_labels" | jq --arg a "$area" '. + [$a] | unique')
+  done
+
+  fields="{\"components\": [{\"name\": $(echo "$COMPONENT" | jq -Rs .)}], \"labels\": $new_labels"
+
+  if [[ "$itype" != "Sub-task" && -n "$TEAM_UUID" ]]; then
+    fields="$fields, \"$TEAM_FIELD\": $(echo "$TEAM_UUID" | jq -Rs .)"
+  fi
+
+  new_summary=$(rename_summary "$summary" "$FEATURE_NAME")
+  if [[ "$new_summary" != "$summary" ]]; then
+    fields="$fields, \"summary\": $(echo "$new_summary" | jq -Rs .)"
+  fi
+
+  if [[ "$SET_ACTIVITY" == true && "$itype" != "Sub-task" ]]; then
+    fields="$fields, \"$ACTIVITY_TYPE_FIELD\": {\"id\": \"$NEW_FEATURES_ID\"}"
+  fi
+
+  fields="$fields}"
+  payload="{\"fields\": $fields}"
+
+  http_code=$(jira_put "/rest/api/3/issue/$key" "$payload" 2>/dev/null) || http_code="error"
+
+  if [[ "$http_code" == "204" || "$http_code" == "200" ]]; then
+    echo "  ✓ $key"
+    SUCCESS=$((SUCCESS + 1))
+  else
+    echo "  ✗ $key (HTTP $http_code)"
+    FAIL=$((FAIL + 1))
+  fi
+done <<EOF
+$(echo "$ALL_ISSUES" | jq -c '.[]')
+EOF
+
+echo ""
+echo "Done: $SUCCESS updated, $FAIL failed."

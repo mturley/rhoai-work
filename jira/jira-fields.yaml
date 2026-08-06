@@ -1,0 +1,45 @@
+project:
+  key: RHOAIENG
+  id: "10350"
+  component: AI Core Dashboard
+  component_id: "15570"
+
+custom_fields:
+  team: customfield_10001
+  epic_link: customfield_10014
+  activity_type: customfield_10464
+
+activity_types:
+  tech_debt: "12228"
+  new_features: "12229"
+  learning: "12230"
+
+scrum_teams:
+  dashboard-tangerine-scrum:
+    name: RHAI Tangerine
+    uuid: 9679da1b-1866-4348-b65c-5ba033e9b761
+  dashboard-crimson-scrum:
+    name: RHAI Crimson
+    uuid: c6e27e7d-7675-4a9c-98cc-1625898636ba
+  dashboard-razzmatazz-scrum:
+    name: RHAI Razzmatazz
+    uuid: a3b9f319-0849-47bb-a8ee-ac908b882105
+  dashboard-onyx-scrum:
+    name: RHAI Onyx
+    uuid: 2c35865b-83c2-4931-911f-041d57c82532
+  dashboard-zaffre-scrum:
+    name: RHAI Zaffre
+    uuid: c1466179-4c13-43a4-895d-c632789ded28
+  dashboard-green-scrum:
+    name: RHAI Green
+    uuid: cffa1fd0-e59a-4305-b39e-1d40ae31112e
+  dashboard-purple-scrum:
+    name: RHAI Purple
+    uuid: 2cddc7b3-7a62-4be8-942d-1e160767cef1
+  dashboard-monarch-scrum:
+    name: RHAI Monarch
+    uuid: 6cb9996b-0281-4bee-b062-611b1d2d1baa
+
+fallback_team:
+  name: RHOAI Dashboard
+  uuid: ec74d716-af36-4b3c-950f-f79213d08f71-1809

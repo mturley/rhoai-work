@@ -6,13 +6,19 @@
 # Superpowers docs (specs, plans, etc.) live under docs/superpowers/ in a
 # product repo worktree but must NOT be checked in to product repos like
 # odh-dashboard. This script copies the current worktree's docs/superpowers/
-# contents into ~/git/rhoai-work/superpowers-backups/{repo}/ where {repo} is
-# the basename of the git toplevel (e.g. odh-dashboard).
+# contents into ~/git/rhoai-work/superpowers-backups/{repo}/{subdir}/ where
+# {repo} is the repo name (e.g. odh-dashboard) and {subdir} is the worktree
+# title ($WORKTREE_TITLE) if set, otherwise the current git branch. Using the
+# worktree title keeps backups stable per worktree even if the branch changes
+# while specs are still uncommitted. Alongside the backed-up files it writes
+# worktree-info.txt capturing the output of `worktree info` for the worktree
+# the backup came from.
 #
-# Example: run from an odh-dashboard worktree containing
-#   docs/superpowers/specs/...
-# and it will be copied to
-#   ~/git/rhoai-work/superpowers-backups/odh-dashboard/specs/...
+# Example: run from an odh-dashboard worktree titled "wt rhoaieng-68987"
+# containing docs/superpowers/specs/... and it will be copied to
+#   ~/git/rhoai-work/superpowers-backups/odh-dashboard/wt-rhoaieng-68987/specs/...
+# with worktree metadata in
+#   ~/git/rhoai-work/superpowers-backups/odh-dashboard/wt-rhoaieng-68987/worktree-info.txt
 
 set -euo pipefail
 
@@ -35,10 +41,40 @@ if ! common_git_dir="$(git rev-parse --path-format=absolute --git-common-dir 2>/
 fi
 repo="$(basename "$(dirname "$common_git_dir")")"
 
-dest="$BACKUPS_DIR/$repo"
+# Determine the subdirectory that identifies this backup. Prefer the worktree
+# title ($WORKTREE_TITLE, set by the `worktree` tool) so backups stay stable
+# per worktree even if the branch changes while specs are uncommitted. Fall
+# back to the current branch, then to a short commit hash if detached.
+if [[ -n "${WORKTREE_TITLE:-}" ]]; then
+  subdir="$WORKTREE_TITLE"
+else
+  subdir="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+  if [[ -z "$subdir" || "$subdir" == "HEAD" ]]; then
+    subdir="detached-$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+  fi
+fi
+# The value can contain slashes (e.g. branch feature/foo) or spaces (e.g. the
+# title "wt rhoaieng-68987"); flatten to a single, filesystem-friendly level.
+subdir="${subdir//\//-}"
+subdir="${subdir// /-}"
+
+dest="$BACKUPS_DIR/$repo/$subdir"
 mkdir -p "$dest"
 
 echo "superpowers-backup: $src -> $dest"
+
+# Capture worktree metadata alongside the backup. Strip ANSI color codes so
+# the file is plain text. Non-fatal if `worktree` isn't available.
+info_file="$dest/worktree-info.txt"
+if command -v worktree >/dev/null 2>&1; then
+  if worktree info 2>&1 | sed $'s/\033\\[[0-9;]*m//g' > "$info_file"; then
+    echo "  [info] worktree-info.txt"
+  else
+    echo "superpowers-backup: warning: 'worktree info' failed; worktree-info.txt may be incomplete" >&2
+  fi
+else
+  echo "superpowers-backup: warning: 'worktree' command not found; skipping worktree-info.txt" >&2
+fi
 
 # Walk every file under docs/superpowers/, classify it against the existing
 # backup (new / updated / unchanged), then copy it. Uses a null-delimited find

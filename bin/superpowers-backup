@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+#
+# superpowers-backup — back up superpowers docs from the current worktree into
+# the rhoai-work workspace, which serves as a personal historical record.
+#
+# Superpowers docs (specs, plans, etc.) live under docs/superpowers/ in a
+# product repo worktree but must NOT be checked in to product repos like
+# odh-dashboard. This script copies the current worktree's docs/superpowers/
+# contents into ~/git/rhoai-work/superpowers-backups/{repo}/ where {repo} is
+# the basename of the git toplevel (e.g. odh-dashboard).
+#
+# Example: run from an odh-dashboard worktree containing
+#   docs/superpowers/specs/...
+# and it will be copied to
+#   ~/git/rhoai-work/superpowers-backups/odh-dashboard/specs/...
+
+set -euo pipefail
+
+RHOAI_WORK="$HOME/git/rhoai-work"
+BACKUPS_DIR="$RHOAI_WORK/superpowers-backups"
+
+src="$PWD/docs/superpowers"
+
+if [[ ! -d "$src" ]]; then
+  echo "superpowers-backup: no docs/superpowers directory found in $PWD" >&2
+  exit 1
+fi
+
+# Determine the repo name from the git toplevel basename.
+if ! toplevel="$(git rev-parse --show-toplevel 2>/dev/null)"; then
+  echo "superpowers-backup: current directory is not inside a git repository" >&2
+  exit 1
+fi
+repo="$(basename "$toplevel")"
+
+dest="$BACKUPS_DIR/$repo"
+mkdir -p "$dest"
+
+echo "superpowers-backup: $src -> $dest"
+
+# Walk every file under docs/superpowers/, classify it against the existing
+# backup (new / updated / unchanged), then copy it. Uses a null-delimited find
+# to handle paths with spaces safely.
+new_count=0
+updated_count=0
+unchanged_count=0
+
+while IFS= read -r -d '' file; do
+  # Path relative to the source root (e.g. specs/example.md).
+  rel="${file#"$src"/}"
+  target="$dest/$rel"
+
+  if [[ ! -e "$target" ]]; then
+    status="new"
+    new_count=$((new_count + 1))
+  elif ! cmp -s "$file" "$target"; then
+    status="updated"
+    updated_count=$((updated_count + 1))
+  else
+    status="unchanged"
+    unchanged_count=$((unchanged_count + 1))
+  fi
+
+  mkdir -p "$(dirname "$target")"
+  cp -p "$file" "$target"
+
+  printf '  [%s] %s\n' "$status" "$rel"
+done < <(find "$src" -type f -print0)
+
+echo "superpowers-backup: $new_count new, $updated_count updated, $unchanged_count unchanged"

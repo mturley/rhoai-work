@@ -26,12 +26,14 @@ if [[ ! -d "$src" ]]; then
   exit 1
 fi
 
-# Determine the repo name from the git toplevel basename.
-if ! toplevel="$(git rev-parse --show-toplevel 2>/dev/null)"; then
+# Determine the repo name. Use the common git dir (shared across all worktrees)
+# rather than the worktree toplevel, whose basename would be the branch/worktree
+# name (e.g. rhoaieng-68987) instead of the repo name (e.g. odh-dashboard).
+if ! common_git_dir="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)"; then
   echo "superpowers-backup: current directory is not inside a git repository" >&2
   exit 1
 fi
-repo="$(basename "$toplevel")"
+repo="$(basename "$(dirname "$common_git_dir")")"
 
 dest="$BACKUPS_DIR/$repo"
 mkdir -p "$dest"

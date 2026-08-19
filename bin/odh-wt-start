@@ -1,6 +1,27 @@
 #!/usr/bin/env bash
-if [[ -z "$1" ]]; then
-  echo "Usage: odh-wt-start <cluster-name>" >&2
+USE_EXT=false
+CLUSTER=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --ext)
+      USE_EXT=true
+      shift
+      ;;
+    *)
+      CLUSTER="$1"
+      shift
+      ;;
+  esac
+done
+
+if [[ -z "$CLUSTER" ]]; then
+  echo "Usage: odh-wt-start [--ext] <cluster-name>" >&2
   exit 1
 fi
-odh-env "$1" && odh-install && odh-dev
+
+if [[ "$USE_EXT" == true ]]; then
+  odh-env "$CLUSTER" && odh-install && odh-dev-ext
+else
+  odh-env "$CLUSTER" && odh-install && odh-dev
+fi

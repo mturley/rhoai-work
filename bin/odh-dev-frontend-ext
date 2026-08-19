@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$SCRIPT_DIR/_functions.sh"
+
+if [[ -n "${WORKTREE_PORTS:-}" ]]; then
+  RANGE_START="${WORKTREE_PORTS%%-*}"
+  export ODH_PORT="$((RANGE_START + 1))"
+  export BACKEND_PORT="$RANGE_START"
+fi
+
+if [[ -n "${WORKTREE_TITLE:-}" ]]; then
+  echo "Using title $WORKTREE_TITLE"
+  export ODH_PRODUCT_NAME="$WORKTREE_TITLE"
+fi
+
+odh
+cd frontend
+npm run start:dev:ext -- --open

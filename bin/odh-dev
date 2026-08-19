@@ -11,12 +11,17 @@ USE_ITERM=false
 USE_DEFAULT_PORTS=false
 USE_DEFAULT_TITLE=false
 USE_SHELL=true
+USE_EXT=false
 TITLE=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --iterm)
       USE_ITERM=true
+      shift
+      ;;
+    --ext)
+      USE_EXT=true
       shift
       ;;
     --no-shell)
@@ -68,9 +73,14 @@ fi
 # --- Dev processes (comment out lines here to skip them) ---
 DEV_NAMES=()
 DEV_CMDS=()
-DEV_NAMES+=("frontend:${FRONTEND_PORT_LABEL}");  DEV_CMDS+=("$SCRIPT_DIR/odh-dev-frontend")
-DEV_NAMES+=("backend:${BACKEND_PORT_LABEL}");    DEV_CMDS+=("$SCRIPT_DIR/odh-dev-backend")
-# DEV_NAMES+=("mr-upstream:${MR_PORT_LABEL}");     DEV_CMDS+=("$SCRIPT_DIR/odh-dev-mr-upstream-federated")
+if [[ "$USE_EXT" == true ]]; then
+  # External-cluster mode: run only the ext frontend (EXT_CLUSTER=true), no local backend.
+  DEV_NAMES+=("frontend:${FRONTEND_PORT_LABEL}");  DEV_CMDS+=("$SCRIPT_DIR/odh-dev-frontend-ext")
+else
+  DEV_NAMES+=("frontend:${FRONTEND_PORT_LABEL}");  DEV_CMDS+=("$SCRIPT_DIR/odh-dev-frontend")
+  DEV_NAMES+=("backend:${BACKEND_PORT_LABEL}");    DEV_CMDS+=("$SCRIPT_DIR/odh-dev-backend")
+  # DEV_NAMES+=("mr-upstream:${MR_PORT_LABEL}");     DEV_CMDS+=("$SCRIPT_DIR/odh-dev-mr-upstream-federated")
+fi
 
 DEV_NAMES_CSV="$(IFS=,; echo "${DEV_NAMES[*]}")"
 

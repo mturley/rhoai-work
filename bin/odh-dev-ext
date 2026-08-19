@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
+# Launch the ODH dashboard against an external cluster (EXT_CLUSTER=true).
+# Thin wrapper around odh-dev --ext so all mprocs / WORKTREE_PORTS logic lives
+# in one place.
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-source "$SCRIPT_DIR/_functions.sh"
-odh
-cd frontend
-npm run start:dev:ext
+exec "$SCRIPT_DIR/odh-dev" --ext "$@"

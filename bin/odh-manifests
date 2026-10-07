@@ -177,9 +177,11 @@ find_operator_pod() {
 
 wait_for_operator() {
   local timeout="${1:-120s}"
-  info "Waiting for operator pod to be ready..."
-  oc wait --for='jsonpath={.status.conditions[?(@.type=="Ready")].status}=True' \
-    po -l name=opendatahub-operator -n "$OPERATOR_NS" --timeout="$timeout"
+  info "Waiting for operator deployment to have a ready replica..."
+  # Waiting on a pod label selector fails immediately when no pods exist yet.
+  # Wait on the deployment instead so the CSV/OLM reconciliation can create it.
+  oc wait --for='jsonpath={.status.readyReplicas}=1' \
+    "deployment/$OPERATOR_DEPLOY" -n "$OPERATOR_NS" --timeout="$timeout"
 }
 
 # Emits the full state as JSON on stdout.
@@ -457,12 +459,11 @@ build_csv_patch() {
          then {op: "add", path: ($base + "/strategy"), value: {type: "Recreate"}}
          else empty end),
 
-        # fsGroup so the operator user can read the mounted manifests
-        (if ($pod.securityContext.fsGroup // null) != 1001
-         then (if $pod.securityContext == null
-               then {op: "add", path: ($base + "/template/spec/securityContext"), value: {fsGroup: 1001}}
-               else {op: "add", path: ($base + "/template/spec/securityContext/fsGroup"), value: 1001}
-               end)
+        # 1001 was previously forced here for PVC access, but restricted-v2
+        # rejects it unless it is in the namespace allowed supplemental groups.
+        # Remove that legacy value; do not impose a fixed fsGroup.
+        (if (($pod.securityContext.fsGroup // null) == 1001)
+         then {op: "remove", path: ($base + "/template/spec/securityContext/fsGroup")}
          else empty end),
 
         # the shared PVC volume
@@ -477,13 +478,22 @@ build_csv_patch() {
         # one subPath mount per component
         ($comps[]
          | . as $c
-         | select(($mounts // []) | map(select(.name == $vol and .subPath == $c)) | length == 0)
-         | if $mounts == null
-           then {op: "add", path: ($base + "/template/spec/containers/0/volumeMounts"),
-                 value: [{name: $vol, mountPath: $paths[$c], subPath: $c}]}
-           else {op: "add", path: ($base + "/template/spec/containers/0/volumeMounts/-"),
-                 value: {name: $vol, mountPath: $paths[$c], subPath: $c}}
-           end)
+         | (($mounts // []) | to_entries | map(select(.value.mountPath == $paths[$c])) | .[0]) as $path_mount
+         | if $path_mount != null
+           then (if $path_mount.value.name == $vol and $path_mount.value.subPath == $c
+                 then empty
+                 else {op: "replace",
+                       path: ($base + "/template/spec/containers/0/volumeMounts/" + ($path_mount.key | tostring)),
+                       value: {name: $vol, mountPath: $paths[$c], subPath: $c}}
+                 end)
+           elif (($mounts // []) | map(select(.name == $vol and .subPath == $c)) | length) == 0
+           then if $mounts == null
+                then {op: "add", path: ($base + "/template/spec/containers/0/volumeMounts"),
+                      value: [{name: $vol, mountPath: $paths[$c], subPath: $c}]}
+                else {op: "add", path: ($base + "/template/spec/containers/0/volumeMounts/-"),
+                      value: {name: $vol, mountPath: $paths[$c], subPath: $c}}
+                end
+           else empty end)
       ]
     '
 }
@@ -495,14 +505,39 @@ cmd_setup() {
   local c
   for c in "${comps[@]}"; do validate_component "$c"; done
 
-  ensure_pvc
-
   local csv csv_json comps_json patch
   csv="$(find_csv)"
   [ -n "$csv" ] || die "no opendatahub-operator CSV found in $OPERATOR_NS"
 
   csv_json=$(oc get csv "$csv" -n "$OPERATOR_NS" -o json)
   comps_json=$(printf '%s\n' "${comps[@]}" | jq -R . | jq -sc .)
+
+  # Ask before replacing mounts that already occupy the required mountPath.
+  local conflicting_mounts component mount_json mount_name mount_path mount_subpath
+  conflicting_mounts=$(jq -c --argjson comps "$comps_json" '
+    (.spec.install.spec.deployments[0].spec.template.spec.containers[0].volumeMounts // []) as $mounts
+    | {dashboard: "/opt/manifests/dashboard", modelcontroller: "/opt/manifests/modelcontroller"} as $paths
+    | [$comps[] as $component
+       | $mounts[]?
+       | select(.mountPath == $paths[$component])
+       | select(.name != "custom-dev-manifests" or .subPath != $component)
+       | {component: $component, mount: .}]
+  ' <<< "$csv_json")
+  if [ "$conflicting_mounts" != "[]" ]; then
+    echo "The CSV already has volume mount(s) at the required path(s):" >&2
+    while IFS= read -r component; do
+      mount_json=$(jq -c --arg component "$component" '[.[] | select(.component == $component)][0].mount' <<< "$conflicting_mounts")
+      mount_name=$(jq -r '.name // "<unnamed>"' <<< "$mount_json")
+      mount_path=$(jq -r '.mountPath // "<unset>"' <<< "$mount_json")
+      mount_subpath=$(jq -r '.subPath // "<none>"' <<< "$mount_json")
+      echo "  $component: name=$mount_name mountPath=$mount_path subPath=$mount_subpath" >&2
+    done < <(jq -r '.[].component' <<< "$conflicting_mounts" | awk '!seen[$0]++')
+    if [ "$ASSUME_YES" != true ] && ! confirm "Replace these mount(s) with the custom manifests PVC mount?"; then
+      die "setup aborted; existing CSV mounts were not changed"
+    fi
+  fi
+
+  ensure_pvc
   patch=$(build_csv_patch "$csv_json" "$comps_json")
 
   if [ "$patch" = "[]" ]; then
@@ -514,7 +549,9 @@ cmd_setup() {
       echo "${C_BOLD}JSON patch operations:${C_RESET}" >&2
       echo "$patch" | jq . | sed 's/^/  /' >&2
     fi
-    confirm_run oc patch csv "$csv" -n "$OPERATOR_NS" --type json -p "$patch"
+    if ! confirm_run oc patch csv "$csv" -n "$OPERATOR_NS" --type json -p "$patch"; then
+      die "failed to patch CSV $csv; the CSV was not updated, so setup cannot continue"
+    fi
   fi
 
   wait_for_operator
@@ -525,32 +562,18 @@ cmd_setup() {
 # Copy manifests
 # ---------------------------------------------------------------------------
 
-copy_dashboard_manifests() {
+copy_dashboard_manifests() (
   local tag="$1" pod="$2" tmp mod_params key_val key
 
   [ -d "$ODH_DIR/manifests" ] || die "dashboard manifests not found at $ODH_DIR/manifests"
 
   tmp=$(mktemp -d)
-  trap 'rm -rf "$tmp"' RETURN
+  trap 'rm -rf "$tmp"' EXIT
   cp -r "$ODH_DIR/manifests/." "$tmp/"
 
   # Core dashboard images
   sed -i.bak "s|^odh-dashboard-image=.*|odh-dashboard-image=quay.io/${DASHBOARD_REPO}:${tag}|" "$tmp/odh/params.env"
   sed -i.bak "s|^core-bff-image=.*|core-bff-image=quay.io/opendatahub/odh-core-bff:${tag}|" "$tmp/odh/params.env"
-
-  # Module UI images in the combined sidecar file
-  for key_val in \
-    "model-registry-ui-image=quay.io/opendatahub/odh-mod-arch-modular-architecture:${tag}" \
-    "gen-ai-ui-image=quay.io/opendatahub/odh-mod-arch-gen-ai:${tag}" \
-    "maas-ui-image=quay.io/opendatahub/mod-arch-maas:${tag}" \
-    "mlflow-ui-image=quay.io/opendatahub/odh-mod-arch-mlflow:${tag}" \
-    "eval-hub-ui-image=quay.io/opendatahub/odh-mod-arch-eval-hub:${tag}" \
-    "automl-ui-image=quay.io/opendatahub/odh-mod-arch-automl:${tag}" \
-    "autorag-ui-image=quay.io/opendatahub/odh-mod-arch-autorag:${tag}" \
-    "agent-ops-ui-image=quay.io/opendatahub/odh-mod-arch-agent-ops:${tag}"; do
-    key="${key_val%%=*}"
-    sed -i.bak "s|^${key}=.*|${key_val}|" "$tmp/sidecar/params.env"
-  done
 
   # Per-module params.env files, preserving each image's repo
   for mod_params in "$tmp"/modules/*/params.env; do
@@ -564,17 +587,17 @@ copy_dashboard_manifests() {
   if [ "$ASSUME_YES" != true ]; then
     echo "" >&2
     echo "${C_BOLD}Image overrides to be written:${C_RESET}" >&2
-    grep -rhE '^[a-z-]+(-image|-ui-image|-bff-image)=' "$tmp/odh/params.env" "$tmp/sidecar/params.env" 2>/dev/null \
+    grep -hE '^[a-z-]+(-image|-ui-image|-bff-image)=quay\.io/' "$tmp/odh/params.env" "$tmp"/modules/*/params.env \
       | sed 's/^/  /' >&2
   fi
   confirm_run oc cp "$tmp/." "$OPERATOR_NS/$pod:/opt/manifests/dashboard"
-}
+)
 
-copy_modelcontroller_manifests() {
+copy_modelcontroller_manifests() (
   local tag="$1" pod="$2" tmp
 
   tmp=$(mktemp -d)
-  trap 'rm -rf "$tmp"' RETURN
+  trap 'rm -rf "$tmp"' EXIT
 
   info "Cloning odh-model-controller config"
   git clone --depth 1 --filter=blob:none --sparse \
@@ -598,7 +621,7 @@ copy_modelcontroller_manifests() {
     sed 's/^/  /' "$tmp/repo/config/base/params.env" >&2
   fi
   confirm_run oc cp "$tmp/repo/config/." "$OPERATOR_NS/$pod:/opt/manifests/modelcontroller"
-}
+)
 
 cmd_copy() {
   local component="${1:-}" tag="${2:-}"

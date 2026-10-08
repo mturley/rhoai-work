@@ -1067,7 +1067,7 @@ interactive_setup() {
     if confirm "Use tag 'main' for dashboard?"; then
       dashboard_tag=main
     else
-      dashboard_tag="$(prompt_for_tag dashboard)"
+      dashboard_tag="$(prompt_for_dashboard_image)"
     fi
   ;; esac
   case " ${comps[*]} " in *" modelcontroller "*)
@@ -1082,7 +1082,7 @@ interactive_setup() {
   echo ""
   echo "${C_BOLD}Plan${C_RESET}"
   if modular_dashboard_present; then
-    echo "  1. Configure dashboard module images on the CSV (tag: ${dashboard_tag:-unchanged})"
+    echo "  1. Configure dashboard module image on the CSV (${dashboard_tag:-unchanged})"
     echo "  2. Set up PVC and copy manifests for modelcontroller, if selected"
     echo "  3. Wait for the module operator to update the dashboard deployment"
   else
@@ -1127,7 +1127,7 @@ interactive_manage() {
   esac
 
   if [ "$comp" = dashboard ]; then
-    tag="$(prompt_for_tag dashboard)"
+    tag="$(prompt_for_dashboard_image)"
   else
     if confirm "Use upstream default images?"; then tag=""; else tag="$(prompt_for_tag modelcontroller)"; fi
   fi

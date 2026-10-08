@@ -16,6 +16,7 @@ OPERATOR_NS="openshift-operators"
 OPERATOR_DEPLOY="opendatahub-operator-controller-manager"
 DASHBOARD_NS="opendatahub"
 DASHBOARD_DEPLOY="odh-dashboard"
+DASHBOARD_OPERATOR_DEPLOY="dashboard-operator"
 PVC_NAME="custom-odh-dev-manifests"
 VOLUME_NAME="custom-dev-manifests"
 DASHBOARD_REPO="opendatahub/odh-dashboard"
@@ -170,6 +171,13 @@ find_csv() {
     | grep opendatahub-operator | head -n1 | cut -d/ -f2 || true
 }
 
+modular_dashboard_present() {
+  local deploy
+  deploy=$(oc get deployment "$DASHBOARD_OPERATOR_DEPLOY" -n "$DASHBOARD_NS" \
+    --ignore-not-found -o json) || die "cannot inspect dashboard operator in $DASHBOARD_NS"
+  [ -n "$deploy" ] && jq -e '.metadata.ownerReferences[]? | select(.kind == "Platform")' <<< "$deploy" >/dev/null
+}
+
 find_operator_pod() {
   oc get po -l name=opendatahub-operator -n "$OPERATOR_NS" \
     -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true
@@ -177,28 +185,58 @@ find_operator_pod() {
 
 wait_for_operator() {
   local timeout="${1:-120s}"
-  info "Waiting for operator deployment to have a ready replica..."
-  # Waiting on a pod label selector fails immediately when no pods exist yet.
-  # Wait on the deployment instead so the CSV/OLM reconciliation can create it.
-  oc wait --for='jsonpath={.status.readyReplicas}=1' \
-    "deployment/$OPERATOR_DEPLOY" -n "$OPERATOR_NS" --timeout="$timeout"
+  info "Waiting for operator deployment rollout..."
+  # OLM may not have created the deployment yet during initial setup.
+  oc wait --for=create "deployment/$OPERATOR_DEPLOY" -n "$OPERATOR_NS" --timeout="$timeout"
+  # A readyReplicas check can succeed on the old pod after a restart. Rollout
+  # status waits for the new generation to be observed and its pods to be ready.
+  oc rollout status "deployment/$OPERATOR_DEPLOY" -n "$OPERATOR_NS" --timeout="$timeout"
+}
+
+# A deployment image can change before its replacement pod is ready. Only
+# compare digests once a ready pod is actually running that requested image.
+dashboard_image_freshness() {
+  local desired="$1" pod_image="$2" pod_ready="$3" pod_image_id="$4" quay_digest="$5"
+  if [ -z "$desired" ]; then
+    echo unknown
+  elif [ "$pod_image" != "$desired" ] || [ "$pod_ready" != true ]; then
+    echo pending
+  elif [ -z "$quay_digest" ] || [ -z "$pod_image_id" ]; then
+    echo unknown
+  elif [ "${pod_image_id##*@}" = "$quay_digest" ]; then
+    echo true
+  else
+    echo false
+  fi
 }
 
 # Emits the full state as JSON on stdout.
 gather_status() {
   local pvc_exists csv_name overridden operator_replicas operator_ready
-  local containers pod_image_id current_tag quay_digest image_current local_commit other
+  local containers pod_image_id current_tag quay_digest image_current local_commit other csv_json modular_dashboard configured_dashboard_image
+  local pod_info pod_image pod_ready dashboard_image
 
   pvc_exists=false
   oc get pvc "$PVC_NAME" -n "$OPERATOR_NS" >/dev/null 2>&1 && pvc_exists=true
 
   csv_name="$(find_csv)"
+  modular_dashboard=false
+  modular_dashboard_present && modular_dashboard=true
   overridden='[]'
+  configured_dashboard_image=''
   if [ -n "$csv_name" ]; then
-    overridden=$(oc get csv "$csv_name" -n "$OPERATOR_NS" \
-      -o jsonpath='{.spec.install.spec.deployments[0].spec.template.spec.containers[0].volumeMounts}' 2>/dev/null \
-      | jq -c --arg vol "$VOLUME_NAME" \
-          '[.[] | select(.name == $vol and has("subPath")) | .subPath]' 2>/dev/null || echo '[]')
+    csv_json=$(oc get csv "$csv_name" -n "$OPERATOR_NS" -o json)
+    overridden=$(jq -c --arg vol "$VOLUME_NAME" --argjson modular "$modular_dashboard" '
+      [.spec.install.spec.deployments[0].spec.template.spec.containers[0] as $container
+       | ($container.volumeMounts // [])[]
+       | select(.name == $vol and has("subPath")) | .subPath]
+      + (if $modular and .metadata.annotations["odh-manifests.dev/original-dashboard-images"] != null
+         then ["dashboard"] else [] end) | unique
+    ' <<< "$csv_json")
+    if [ "$modular_dashboard" = true ]; then
+      configured_dashboard_image=$(jq -r '[.spec.install.spec.deployments[0].spec.template.spec.containers[0].env[]?
+        | select(.name == "RELATED_IMAGE_ODH_DASHBOARD_IMAGE") | .value][0] // ""' <<< "$csv_json")
+    fi
   fi
 
   operator_replicas=$(oc get deployment "$OPERATOR_DEPLOY" -n "$OPERATOR_NS" \
@@ -213,26 +251,27 @@ gather_status() {
               | {name, image, tag: (.image | split(":") | if length > 1 then .[-1] else "latest" end)}]' \
       2>/dev/null || echo '[]')
 
-  pod_image_id=$(oc get pods -n "$DASHBOARD_NS" -l app=odh-dashboard \
-    -o jsonpath='{.items[0].status.containerStatuses[?(@.name=="odh-dashboard")].imageID}' 2>/dev/null || true)
+  dashboard_image=$(jq -r '[.[] | select(.name == "odh-dashboard") | .image][0] // ""' <<< "$containers")
+  pod_info=$(oc get pods -n "$DASHBOARD_NS" -l app=odh-dashboard -o json 2>/dev/null \
+    | jq -c '[.items[]? | {created: .metadata.creationTimestamp,
+               image: ([.spec.containers[]? | select(.name == "odh-dashboard") | .image][0] // ""),
+               imageID: ([.status.containerStatuses[]? | select(.name == "odh-dashboard") | .imageID][0] // ""),
+               ready: ([.status.containerStatuses[]? | select(.name == "odh-dashboard") | .ready][0] // false)}]
+             | sort_by(.created) | last // {}' 2>/dev/null) || pod_info='{}'
+  pod_image=$(jq -r '.image // ""' <<< "$pod_info")
+  pod_image_id=$(jq -r '.imageID // ""' <<< "$pod_info")
+  pod_ready=$(jq -r '.ready // false' <<< "$pod_info")
 
   current_tag=$(echo "$containers" | jq -r '(.[] | select(.name == "odh-dashboard") | .tag) // "unknown"' 2>/dev/null || echo unknown)
   current_tag="${current_tag:-unknown}"
 
   quay_digest=""
-  image_current="unknown"
-  if [ "$current_tag" != "unknown" ]; then
+  if [ -n "$dashboard_image" ] && [ "$pod_image" = "$dashboard_image" ] && [ "$pod_ready" = true ] && [ "$current_tag" != unknown ]; then
     quay_digest=$(curl -sf \
       "https://quay.io/api/v1/repository/${DASHBOARD_REPO}/tag/?specificTag=${current_tag}&onlyActiveTags=true" 2>/dev/null \
       | jq -r '.tags[0].manifest_digest // ""' 2>/dev/null || true)
-    if [ -n "$quay_digest" ] && [ -n "$pod_image_id" ]; then
-      if [ "${pod_image_id##*@}" = "$quay_digest" ]; then
-        image_current=true
-      else
-        image_current=false
-      fi
-    fi
   fi
+  image_current=$(dashboard_image_freshness "$dashboard_image" "$pod_image" "$pod_ready" "$pod_image_id" "$quay_digest")
 
   local_commit=""
   [ -d "$ODH_DIR/.git" ] && local_commit=$(git -C "$ODH_DIR" rev-parse --short HEAD 2>/dev/null || true)
@@ -241,6 +280,7 @@ gather_status() {
 
   jq -n \
     --argjson pvc_exists "$pvc_exists" \
+    --argjson modular_dashboard "$modular_dashboard" \
     --arg pvc_name "$PVC_NAME" \
     --arg csv_name "$csv_name" \
     --argjson overridden_components "$overridden" \
@@ -249,6 +289,7 @@ gather_status() {
     --arg dashboard_namespace "$DASHBOARD_NS" \
     --argjson containers "$containers" \
     --arg current_tag "$current_tag" \
+    --arg configured_dashboard_image "$configured_dashboard_image" \
     --arg pod_image_id "$pod_image_id" \
     --arg quay_latest_digest "$quay_digest" \
     --arg image_current "$image_current" \
@@ -300,7 +341,7 @@ deployments_for() {
 
 print_status() {
   local s="$1"
-  local pvc overridden replicas ready tag image_current commit csv
+  local pvc overridden replicas ready tag image_current commit csv configured_dashboard_image
 
   pvc=$(echo "$s" | jq -r '.pvc_exists')
   csv=$(echo "$s" | jq -r '.csv_name // ""')
@@ -309,6 +350,7 @@ print_status() {
   ready=$(echo "$s" | jq -r '.operator_ready')
   tag=$(echo "$s" | jq -r '.current_tag')
   image_current=$(echo "$s" | jq -r '.image_current')
+  configured_dashboard_image=$(echo "$s" | jq -r '.configured_dashboard_image')
   commit=$(echo "$s" | jq -r '.local_manifests_commit // "unknown"')
 
   echo ""
@@ -324,10 +366,16 @@ print_status() {
   echo ""
 
   if echo "$s" | jq -e '.overridden_components | index("dashboard")' >/dev/null 2>&1; then
+    if [ -n "$configured_dashboard_image" ] && \
+       ! echo "$s" | jq -e --arg expected "$configured_dashboard_image" \
+         '.containers[] | select(.name == "odh-dashboard" and .image == $expected)' >/dev/null; then
+      warn "Dashboard image has not reconciled to $configured_dashboard_image"
+    fi
     case "$image_current" in
       true)  echo "${C_BOLD}Dashboard${C_RESET}  tag ${C_CYAN}${tag}${C_RESET}  ${C_GREEN}up to date${C_RESET}" ;;
-      false) echo "${C_BOLD}Dashboard${C_RESET}  tag ${C_CYAN}${tag}${C_RESET}  ${C_YELLOW}outdated — newer image on quay${C_RESET}" ;;
-      *)     echo "${C_BOLD}Dashboard${C_RESET}  tag ${C_CYAN}${tag}${C_RESET}  ${C_DIM}freshness unknown${C_RESET}" ;;
+      false)   echo "${C_BOLD}Dashboard${C_RESET}  tag ${C_CYAN}${tag}${C_RESET}  ${C_YELLOW}outdated — same tag points to a different image on quay${C_RESET}" ;;
+      pending) echo "${C_BOLD}Dashboard${C_RESET}  tag ${C_CYAN}${tag}${C_RESET}  ${C_YELLOW}rollout pending${C_RESET}" ;;
+      *)       echo "${C_BOLD}Dashboard${C_RESET}  tag ${C_CYAN}${tag}${C_RESET}  ${C_DIM}freshness unknown${C_RESET}" ;;
     esac
     echo "$s" | jq -r '.containers[] | "  \(.name)\t\(.image)"' | column -t -s$'\t' 2>/dev/null \
       || echo "$s" | jq -r '.containers[] | "  \(.name)  \(.image)"'
@@ -344,12 +392,18 @@ print_status() {
 }
 
 describe_state() {
-  local s="$1" pvc count replicas
+  local s="$1" pvc count replicas modular configured_dashboard_image
   pvc=$(echo "$s" | jq -r '.pvc_exists')
   count=$(echo "$s" | jq -r '.overridden_components | length')
   replicas=$(echo "$s" | jq -r '.operator_replicas')
+  modular=$(echo "$s" | jq -r '.modular_dashboard')
+  configured_dashboard_image=$(echo "$s" | jq -r '.configured_dashboard_image')
 
-  if [ "$pvc" != true ]; then
+  if [ -n "$configured_dashboard_image" ] &&
+     ! echo "$s" | jq -e --arg expected "$configured_dashboard_image" \
+       '.containers[] | select(.name == "odh-dashboard" and .image == $expected)' >/dev/null; then
+    echo "${C_YELLOW}waiting for dashboard image${C_RESET}"
+  elif [ "$pvc" != true ] && { [ "$modular" != true ] || [ "$count" = 0 ]; }; then
     echo "${C_DIM}not set up${C_RESET}"
   elif [ "$count" = "0" ] || [ "$replicas" = "0" ]; then
     echo "${C_YELLOW}partially set up${C_RESET}"
@@ -475,25 +529,25 @@ build_csv_patch() {
                value: {name: $vol, persistentVolumeClaim: {claimName: $pvc}}}
          else empty end),
 
-        # one subPath mount per component
-        ($comps[]
-         | . as $c
-         | (($mounts // []) | to_entries | map(select(.value.mountPath == $paths[$c])) | .[0]) as $path_mount
-         | if $path_mount != null
-           then (if $path_mount.value.name == $vol and $path_mount.value.subPath == $c
-                 then empty
-                 else {op: "replace",
-                       path: ($base + "/template/spec/containers/0/volumeMounts/" + ($path_mount.key | tostring)),
+        # Create the array once when absent; otherwise patch individual mounts.
+        (if $mounts == null
+         then {op: "add", path: ($base + "/template/spec/containers/0/volumeMounts"),
+               value: [$comps[] | {name: $vol, mountPath: $paths[.], subPath: .}]}
+         else ($comps[]
+               | . as $c
+               | ($mounts | to_entries | map(select(.value.mountPath == $paths[$c])) | .[0]) as $path_mount
+               | if $path_mount != null
+                 then (if $path_mount.value.name == $vol and $path_mount.value.subPath == $c
+                       then empty
+                       else {op: "replace",
+                             path: ($base + "/template/spec/containers/0/volumeMounts/" + ($path_mount.key | tostring)),
+                             value: {name: $vol, mountPath: $paths[$c], subPath: $c}}
+                       end)
+                 elif ($mounts | map(select(.name == $vol and .subPath == $c)) | length) == 0
+                 then {op: "add", path: ($base + "/template/spec/containers/0/volumeMounts/-"),
                        value: {name: $vol, mountPath: $paths[$c], subPath: $c}}
-                 end)
-           elif (($mounts // []) | map(select(.name == $vol and .subPath == $c)) | length) == 0
-           then if $mounts == null
-                then {op: "add", path: ($base + "/template/spec/containers/0/volumeMounts"),
-                      value: [{name: $vol, mountPath: $paths[$c], subPath: $c}]}
-                else {op: "add", path: ($base + "/template/spec/containers/0/volumeMounts/-"),
-                      value: {name: $vol, mountPath: $paths[$c], subPath: $c}}
-                end
-           else empty end)
+                 else empty end)
+         end)
       ]
     '
 }
@@ -504,6 +558,18 @@ cmd_setup() {
 
   local c
   for c in "${comps[@]}"; do validate_component "$c"; done
+
+  if modular_dashboard_present; then
+    local legacy_comps=()
+    for c in "${comps[@]}"; do
+      [ "$c" = dashboard ] || legacy_comps+=("$c")
+    done
+    if [ ${#legacy_comps[@]} -eq 0 ]; then
+      info "Dashboard uses a module operator; no PVC setup is required. Use 'odh-manifests switch dashboard <tag>' to set its image."
+      return
+    fi
+    comps=("${legacy_comps[@]}")
+  fi
 
   local csv csv_json comps_json patch
   csv="$(find_csv)"
@@ -623,10 +689,94 @@ copy_modelcontroller_manifests() (
   confirm_run oc cp "$tmp/repo/config/." "$OPERATOR_NS/$pod:/opt/manifests/modelcontroller"
 )
 
+# The module operator receives operand images from the main operator via
+# RELATED_IMAGE_* env vars, not from the main operator manifest mount. Override
+# only the dashboard image: PR tags are not necessarily built for the BFF or
+# modules (e.g. pr-10142 is missing from their Quay repositories).
+modular_dashboard_images() {
+  local tag="$1"
+  jq -cn --arg tag "$tag" '[{name: "RELATED_IMAGE_ODH_DASHBOARD_IMAGE",
+    value: ("quay.io/opendatahub/odh-dashboard:" + $tag)}]'
+}
+
+build_modular_dashboard_patch() {
+  local csv_json="$1" images="$2"
+  jq -cn --argjson csv "$csv_json" --argjson images "$images" '
+    "/spec/install/spec/deployments/0/spec" as $base
+    | $csv.spec.install.spec.deployments[0].spec as $spec
+    | ($spec.template.spec.containers[0].env // null) as $env
+    | ($images | map(.name)) as $names
+    | (($env // []) | map(select(.name as $name | $names | index($name) != null)) | tojson) as $original
+    | [(if $csv.metadata.annotations["odh-manifests.dev/original-dashboard-images"] == null
+        then (if $csv.metadata.annotations == null
+              then {op: "add", path: "/metadata/annotations", value: {"odh-manifests.dev/original-dashboard-images": $original}}
+              else {op: "add", path: "/metadata/annotations/odh-manifests.dev~1original-dashboard-images", value: $original}
+              end)
+        else empty end),
+       (if ($spec.replicas // 1) != 1
+        then {op: "add", path: ($base + "/replicas"), value: 1}
+        else empty end),
+       (if $env == null
+        then {op: "add", path: ($base + "/template/spec/containers/0/env"), value: $images}
+        else ($images[] as $image
+              | ($env | to_entries | map(select(.value.name == $image.name)) | .[0]) as $existing
+              | if $existing == null
+                then {op: "add", path: ($base + "/template/spec/containers/0/env/-"), value: $image}
+                elif $existing.value.value != $image.value or $existing.value.valueFrom != null
+                then {op: "replace", path: ($base + "/template/spec/containers/0/env/" + ($existing.key | tostring)), value: $image}
+                else empty end)
+        end)]'
+}
+
+# Wait for the module operator to receive the new env and reconcile the operand.
+wait_for_dashboard_image() {
+  local expected="$1" timeout="${2:-300}" deadline=$((SECONDS + ${2:-300})) actual
+  info "Waiting for dashboard operator and $DASHBOARD_DEPLOY to use $expected..."
+  while (( SECONDS < deadline )); do
+    actual=$(oc get deployment "$DASHBOARD_OPERATOR_DEPLOY" -n "$DASHBOARD_NS" -o json 2>/dev/null \
+      | jq -r '.spec.template.spec.containers[] | select(.name == "manager") | .env[]? | select(.name == "RELATED_IMAGE_ODH_DASHBOARD_IMAGE") | .value' 2>/dev/null) || actual=""
+    if [ "$actual" = "$expected" ]; then
+      oc rollout status "deployment/$DASHBOARD_OPERATOR_DEPLOY" -n "$DASHBOARD_NS" --timeout="${timeout}s" || return 1
+      actual=$(oc get deployment "$DASHBOARD_DEPLOY" -n "$DASHBOARD_NS" -o json 2>/dev/null \
+        | jq -r '.spec.template.spec.containers[] | select(.name == "odh-dashboard") | .image' 2>/dev/null) || actual=""
+      [ "$actual" = "$expected" ] && return 0
+    fi
+    sleep 3
+  done
+  die "dashboard image did not change to $expected (current deployment image: ${actual:-unknown}); check dashboard-operator logs"
+}
+
+copy_modular_dashboard_images() {
+  local tag="$1" csv csv_json images patch expected
+  csv="$(find_csv)"
+  [ -n "$csv" ] || die "no opendatahub-operator CSV found in $OPERATOR_NS"
+  csv_json=$(oc get csv "$csv" -n "$OPERATOR_NS" -o json)
+  images=$(modular_dashboard_images "$tag")
+  patch=$(build_modular_dashboard_patch "$csv_json" "$images")
+  expected="quay.io/${DASHBOARD_REPO}:${tag}"
+  if [ "$patch" != '[]' ]; then
+    info "Setting dashboard module images on CSV $csv (tag: $tag)"
+    if [ "$ASSUME_YES" != true ]; then
+      echo "The main operator injects these image overrides into $DASHBOARD_OPERATOR_DEPLOY:" >&2
+      echo "$images" | jq -r '.[] | "  \(.name)=\(.value)"' >&2
+    fi
+    confirm_run oc patch csv "$csv" -n "$OPERATOR_NS" --type json -p "$patch"
+  fi
+  wait_for_operator
+  wait_for_dashboard_image "$expected"
+  ok "Dashboard deployment now requests $expected"
+}
+
 cmd_copy() {
   local component="${1:-}" tag="${2:-}"
   [ -n "$component" ] || die "usage: odh-manifests copy <component> [tag]"
   validate_component "$component"
+
+  if [ "$component" = dashboard ] && modular_dashboard_present; then
+    [ -n "$tag" ] || die "tag is required for the dashboard component"
+    copy_modular_dashboard_images "$tag"
+    return
+  fi
 
   local pod
   pod="$(find_operator_pod)"
@@ -702,21 +852,64 @@ cmd_switch() {
     dashboard)       watch_rollout "$DASHBOARD_DEPLOY" ;;
     modelcontroller) watch_rollout "model-serving-api" ;;
   esac
+
+  # Fetch fresh deployment and pod state after the rollout, not the state
+  # captured before switching tags or while the old pod was still running.
+  print_status "$(gather_status)"
+}
+
+build_modular_restore_patch() {
+  local csv_json="$1" names="$2" original="$3"
+  jq -cn --argjson csv "$csv_json" --argjson names "$names" --argjson original "$original" '
+    "/spec/install/spec/deployments/0/spec/template/spec/containers/0/env" as $base
+    | ($csv.spec.install.spec.deployments[0].spec.template.spec.containers[0].env // [])
+    | [to_entries[] | select(.value.name as $name | $names | index($name) != null)]
+    | (sort_by(.key) | reverse | map({op: "remove", path: ($base + "/" + (.key | tostring))}))
+      + ($original | map({op: "add", path: ($base + "/-"), value: .}))
+      + [{op: "remove", path: "/metadata/annotations/odh-manifests.dev~1original-dashboard-images"}]'
 }
 
 cmd_revert() {
-  info "Scaling operator to 0"
-  confirm_run oc scale "deployment/$OPERATOR_DEPLOY" -n "$OPERATOR_NS" --replicas=0
+  local keep_operator=false modular_csv modular_json image_names image_patch original
+  if modular_dashboard_present; then
+    modular_csv="$(find_csv)"
+    if [ -n "$modular_csv" ]; then
+      modular_json=$(oc get csv "$modular_csv" -n "$OPERATOR_NS" -o json)
+      original=$(jq -r '.metadata.annotations["odh-manifests.dev/original-dashboard-images"] // empty' <<< "$modular_json")
+      if [ -n "$original" ]; then
+        image_names=$(modular_dashboard_images unused | jq -c '[.[].name]')
+        image_patch=$(build_modular_restore_patch "$modular_json" "$image_names" "$original")
+        info "Restoring prior dashboard module image overrides on CSV $modular_csv"
+        confirm_run oc patch csv "$modular_csv" -n "$OPERATOR_NS" --type json -p "$image_patch"
+        keep_operator=true
+        wait_for_operator
+        local original_dashboard_image
+        original_dashboard_image=$(jq -r '[.[] | select(.name == "RELATED_IMAGE_ODH_DASHBOARD_IMAGE") | .value][0] // ""' <<< "$original")
+        if [ -n "$original_dashboard_image" ]; then
+          wait_for_dashboard_image "$original_dashboard_image"
+        else
+          warn "Prior dashboard image came from the operator defaults; allow its reconciliation to restore the deployment"
+        fi
+      fi
+    fi
+  fi
+
+  if [ "$keep_operator" = false ]; then
+    info "Scaling operator to 0"
+    confirm_run oc scale "deployment/$OPERATOR_DEPLOY" -n "$OPERATOR_NS" --replicas=0
+  else
+    info "Keeping operator running so it can reconcile the restored module images"
+  fi
 
   local csv cleaned
   csv="$(find_csv)"
   if [ -n "$csv" ]; then
     info "Cleaning CSV $csv"
     cleaned=$(oc get csv "$csv" -n "$OPERATOR_NS" -o json \
-      | jq --arg vol "$VOLUME_NAME" '
+      | jq --arg vol "$VOLUME_NAME" --argjson keep_operator "$keep_operator" '
           .spec.install.spec.deployments[0].spec |= (
             del(.strategy)
-            | .replicas = 0
+            | .replicas = (if $keep_operator then 1 else 0 end)
             | .template.spec |= (
                 (if .securityContext then .securityContext |= del(.fsGroup) else . end)
                 | (if .securityContext == {} then del(.securityContext) else . end)
@@ -741,8 +934,10 @@ cmd_revert() {
   info "Deleting PVC $PVC_NAME"
   confirm_run oc delete pvc "$PVC_NAME" -n "$OPERATOR_NS" --ignore-not-found
 
-  ok "Revert complete — operator scaled to 0, custom manifests removed"
-  info "Deployments keep running with their last-applied images"
+  ok "Revert complete — custom manifests and dashboard image overrides removed"
+  if [ "$keep_operator" = false ]; then
+    info "Operator scaled to 0; deployments keep running with their last-applied images"
+  fi
 }
 
 cmd_tags() {
@@ -808,7 +1003,8 @@ interactive() {
     manage) interactive_manage ;;
     revert)
       echo ""
-      echo "This will scale the operator to 0, clean the CSV, and delete the PVC."
+      echo "This will restore saved dashboard image settings (if present), clean the CSV, and delete the PVC."
+      echo "The main operator stays running when it needs to propagate restored module images."
       confirm "Proceed with revert?" && cmd_revert || info "Cancelled"
       ;;
     quit)   info "Nothing to do" ;;
@@ -851,11 +1047,17 @@ interactive_setup() {
 
   echo ""
   echo "${C_BOLD}Plan${C_RESET}"
-  echo "  1. Ensure PVC $PVC_NAME exists in $OPERATOR_NS"
-  echo "  2. Patch CSV with mounts for: ${comps[*]}"
-  echo "  3. Wait for the operator pod"
-  echo "  4. Copy manifests${dashboard_tag:+ (dashboard: $dashboard_tag)}${mc_tag:+ (modelcontroller: $mc_tag)}"
-  echo "  5. Restart the operator and watch rollouts"
+  if modular_dashboard_present; then
+    echo "  1. Configure dashboard module images on the CSV (tag: ${dashboard_tag:-unchanged})"
+    echo "  2. Set up PVC and copy manifests for modelcontroller, if selected"
+    echo "  3. Wait for the module operator to update the dashboard deployment"
+  else
+    echo "  1. Ensure PVC $PVC_NAME exists in $OPERATOR_NS"
+    echo "  2. Patch CSV with mounts for: ${comps[*]}"
+    echo "  3. Wait for the operator pod"
+    echo "  4. Copy manifests${dashboard_tag:+ (dashboard: $dashboard_tag)}${mc_tag:+ (modelcontroller: $mc_tag)}"
+    echo "  5. Restart the operator and watch rollouts"
+  fi
   echo ""
   confirm "Proceed?" || { info "Cancelled"; return; }
 
@@ -929,7 +1131,7 @@ ${C_BOLD}FLAGS${C_RESET}
   -y, --yes         Skip the approval prompt before each cluster write
 
 ${C_BOLD}COMPONENTS${C_RESET}
-  dashboard         odh-dashboard and all module sidecars
+  dashboard         odh-dashboard image via module operator (or legacy PVC manifests)
   modelcontroller   model-serving-api and odh-model-controller
 
 ${C_BOLD}SAFETY${C_RESET}
@@ -983,4 +1185,6 @@ main() {
   esac
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi

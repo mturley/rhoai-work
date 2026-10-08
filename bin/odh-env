@@ -353,19 +353,28 @@ add_cluster() {
     *) die "invalid choice" ;;
   esac
 
-  printf "Username: "
-  read -r new_user
-  [[ -n "$new_user" ]] || die "username is required"
+  local -a new_users=() new_passwords=()
+  while true; do
+    printf "Username: "
+    read -r new_user
+    [[ -n "$new_user" ]] || die "username is required"
 
-  printf "Password: "
-  read -rs new_pass
-  echo ""
-  [[ -n "$new_pass" ]] || die "password is required"
+    printf "Password: "
+    read -rs new_pass
+    echo ""
+    [[ -n "$new_pass" ]] || die "password is required"
+    new_users+=("$new_user")
+    new_passwords+=("$new_pass")
+
+    printf "Add another user? (y/N) "
+    read -r add_another
+    [[ "$add_another" =~ ^[Yy] ]] || break
+  done
 
   # Log in to discover routes
   echo ""
   echo "Logging in to discover routes..."
-  retry_loop "Login" oc login "$new_url" -u "$new_user" -p "$new_pass" --insecure-skip-tls-verify=true
+  retry_loop "Login" oc login "$new_url" -u "${new_users[0]}" -p "${new_passwords[0]}" --insecure-skip-tls-verify=true
 
   # Discover OCP console URL
   local ocp_host
@@ -391,15 +400,16 @@ add_cluster() {
   local dash_url=""
   [[ -n "$dash_host" ]] && dash_url="https://$dash_host/"
 
-  # Escape # in passwords so they survive Make's `include` (which treats # as comment)
-  local escaped_pass="${new_pass//#/\\#}"
-
   # Build the cluster definition block
   local block=""
   block+="# @cluster id=$new_id name=\"$new_name\" type=$new_type"$'\n'
   [[ -n "$ocp_url" ]] && block+="# @url OCP $ocp_url"$'\n'
   [[ -n "$dash_url" ]] && block+="# @url $dash_label $dash_url"$'\n'
-  block+="# @user $new_user $escaped_pass"$'\n'
+  for i in "${!new_users[@]}"; do
+    # Escape # in passwords so they survive Make's `include` (which treats # as comment)
+    local escaped_pass="${new_passwords[$i]//#/\\#}"
+    block+="# @user ${new_users[$i]} $escaped_pass"$'\n'
+  done
   block+="# @env OC_URL=$new_url"$'\n'
   block+="# @endcluster"
 
@@ -449,9 +459,9 @@ add_cluster() {
   [[ -n "$new_idx" ]] || die "failed to find newly added cluster '$new_id'"
 
   # We already know the user/pass — write active block directly
-  write_active_block "$new_idx" "$new_user" "$new_pass"
+  write_active_block "$new_idx" "${new_users[0]}" "${new_passwords[0]}"
 
-  print_summary "$new_idx" "$new_user"
+  print_summary "$new_idx" "${new_users[0]}"
 
   # Already logged in from discovery step, just verify
   echo "Already logged in."

@@ -14,9 +14,13 @@ ODH_DIR="$WORKSPACE/opendatahub-io/odh-dashboard"
 
 OPERATOR_NS="openshift-operators"
 OPERATOR_DEPLOY="opendatahub-operator-controller-manager"
+OPERATOR_POD_SELECTOR="name=opendatahub-operator"
 DASHBOARD_NS="opendatahub"
 DASHBOARD_DEPLOY="odh-dashboard"
+DASHBOARD_CONTAINER="odh-dashboard"
+DASHBOARD_POD_SELECTOR="app=odh-dashboard"
 DASHBOARD_OPERATOR_DEPLOY="dashboard-operator"
+CLUSTER_FLAVOR="odh"
 PVC_NAME="custom-odh-dev-manifests"
 VOLUME_NAME="custom-dev-manifests"
 DASHBOARD_REPO="opendatahub/odh-dashboard"
@@ -168,18 +172,34 @@ quay_repo_for() {
 
 find_csv() {
   oc get csv -n "$OPERATOR_NS" -o name 2>/dev/null \
-    | grep opendatahub-operator | head -n1 | cut -d/ -f2 || true
+    | grep -E 'opendatahub-operator|rhods-operator' | head -n1 | cut -d/ -f2 || true
+}
+
+configure_cluster_layout() {
+  if oc get csv -n redhat-ods-operator -o name 2>/dev/null | grep -q 'rhods-operator'; then
+    CLUSTER_FLAVOR="rhoai"
+    OPERATOR_NS="redhat-ods-operator"
+    OPERATOR_DEPLOY="rhods-operator"
+    OPERATOR_POD_SELECTOR="name=rhods-operator"
+    DASHBOARD_NS="redhat-ods-applications"
+    DASHBOARD_DEPLOY="rhods-dashboard"
+    DASHBOARD_CONTAINER="rhods-dashboard"
+    DASHBOARD_POD_SELECTOR="app=rhods-dashboard"
+  fi
 }
 
 modular_dashboard_present() {
   local deploy
   deploy=$(oc get deployment "$DASHBOARD_OPERATOR_DEPLOY" -n "$DASHBOARD_NS" \
     --ignore-not-found -o json) || die "cannot inspect dashboard operator in $DASHBOARD_NS"
-  [ -n "$deploy" ] && jq -e '.metadata.ownerReferences[]? | select(.kind == "Platform")' <<< "$deploy" >/dev/null
+  [ -n "$deploy" ] && jq -e '
+    any(.metadata.ownerReferences[]?; .kind == "Platform" or .kind == "Dashboard" or .kind == "DataScienceCluster") and
+    any(.spec.template.spec.containers[]?.env[]?; .name == "RELATED_IMAGE_ODH_DASHBOARD_IMAGE")' \
+    <<< "$deploy" >/dev/null
 }
 
 find_operator_pod() {
-  oc get po -l name=opendatahub-operator -n "$OPERATOR_NS" \
+  oc get po -l "$OPERATOR_POD_SELECTOR" -n "$OPERATOR_NS" \
     -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true
 }
 
@@ -214,7 +234,7 @@ dashboard_image_freshness() {
 gather_status() {
   local pvc_exists csv_name overridden operator_replicas operator_ready
   local containers pod_image_id current_tag quay_digest image_current local_commit other csv_json modular_dashboard configured_dashboard_image
-  local pod_info pod_image pod_ready dashboard_image
+  local pod_info pod_image pod_ready dashboard_image quay_ref quay_repo
 
   pvc_exists=false
   oc get pvc "$PVC_NAME" -n "$OPERATOR_NS" >/dev/null 2>&1 && pvc_exists=true
@@ -248,27 +268,31 @@ gather_status() {
 
   containers=$(oc get deployment "$DASHBOARD_DEPLOY" -n "$DASHBOARD_NS" -o json 2>/dev/null \
     | jq -c '[.spec.template.spec.containers[]
-              | {name, image, tag: (.image | split(":") | if length > 1 then .[-1] else "latest" end)}]' \
+              | {name, image, tag: (.image | split("@")[0] | split(":") | if length > 1 then .[-1] else "latest" end)}]' \
       2>/dev/null || echo '[]')
 
-  dashboard_image=$(jq -r '[.[] | select(.name == "odh-dashboard") | .image][0] // ""' <<< "$containers")
-  pod_info=$(oc get pods -n "$DASHBOARD_NS" -l app=odh-dashboard -o json 2>/dev/null \
-    | jq -c '[.items[]? | {created: .metadata.creationTimestamp,
-               image: ([.spec.containers[]? | select(.name == "odh-dashboard") | .image][0] // ""),
-               imageID: ([.status.containerStatuses[]? | select(.name == "odh-dashboard") | .imageID][0] // ""),
-               ready: ([.status.containerStatuses[]? | select(.name == "odh-dashboard") | .ready][0] // false)}]
+  dashboard_image=$(jq -r --arg name "$DASHBOARD_CONTAINER" '[.[] | select(.name == $name) | .image][0] // ""' <<< "$containers")
+  pod_info=$(oc get pods -n "$DASHBOARD_NS" -l "$DASHBOARD_POD_SELECTOR" -o json 2>/dev/null \
+    | jq -c --arg name "$DASHBOARD_CONTAINER" '[.items[]? | {created: .metadata.creationTimestamp,
+               image: ([.spec.containers[]? | select(.name == $name) | .image][0] // ""),
+               imageID: ([.status.containerStatuses[]? | select(.name == $name) | .imageID][0] // ""),
+               ready: ([.status.containerStatuses[]? | select(.name == $name) | .ready][0] // false)}]
              | sort_by(.created) | last // {}' 2>/dev/null) || pod_info='{}'
   pod_image=$(jq -r '.image // ""' <<< "$pod_info")
   pod_image_id=$(jq -r '.imageID // ""' <<< "$pod_info")
   pod_ready=$(jq -r '.ready // false' <<< "$pod_info")
 
-  current_tag=$(echo "$containers" | jq -r '(.[] | select(.name == "odh-dashboard") | .tag) // "unknown"' 2>/dev/null || echo unknown)
+  current_tag=$(echo "$containers" | jq -r --arg name "$DASHBOARD_CONTAINER" '(.[] | select(.name == $name) | .tag) // "unknown"' 2>/dev/null || echo unknown)
   current_tag="${current_tag:-unknown}"
 
   quay_digest=""
-  if [ -n "$dashboard_image" ] && [ "$pod_image" = "$dashboard_image" ] && [ "$pod_ready" = true ] && [ "$current_tag" != unknown ]; then
+  if [[ "$dashboard_image" == quay.io/*:* ]] && [[ "$dashboard_image" != *@* ]] && \
+     [ "$pod_image" = "$dashboard_image" ] && [ "$pod_ready" = true ]; then
+    quay_ref="${dashboard_image#quay.io/}"
+    quay_repo="${quay_ref%:*}"
+    current_tag="${quay_ref##*:}"
     quay_digest=$(curl -sf \
-      "https://quay.io/api/v1/repository/${DASHBOARD_REPO}/tag/?specificTag=${current_tag}&onlyActiveTags=true" 2>/dev/null \
+      "https://quay.io/api/v1/repository/${quay_repo}/tag/?specificTag=${current_tag}&onlyActiveTags=true" 2>/dev/null \
       | jq -r '.tags[0].manifest_digest // ""' 2>/dev/null || true)
   fi
   image_current=$(dashboard_image_freshness "$dashboard_image" "$pod_image" "$pod_ready" "$pod_image_id" "$quay_digest")
@@ -358,7 +382,11 @@ print_status() {
   echo "${C_BOLD}User${C_RESET}       $(oc whoami 2>/dev/null || echo unknown)"
   echo ""
   echo "${C_BOLD}Setup state:${C_RESET} $(describe_state "$s")"
-  echo "  PVC              $PVC_NAME $([ "$pvc" = true ] && echo "${C_GREEN}exists${C_RESET}" || echo "${C_DIM}absent${C_RESET}")"
+  if [ "$CLUSTER_FLAVOR" = rhoai ] && [ "$(echo "$s" | jq -r '.modular_dashboard')" = true ]; then
+    echo "  PVC              not required for RHOAI dashboard image overrides"
+  else
+    echo "  PVC              $PVC_NAME $([ "$pvc" = true ] && echo "${C_GREEN}exists${C_RESET}" || echo "${C_DIM}absent${C_RESET}")"
+  fi
   echo "  CSV              ${csv:-${C_DIM}none${C_RESET}}"
   echo "  Operator         ${ready}/${replicas} ready"
   echo "  Overridden       ${overridden:-${C_DIM}none${C_RESET}}"
@@ -367,8 +395,8 @@ print_status() {
 
   if echo "$s" | jq -e '.overridden_components | index("dashboard")' >/dev/null 2>&1; then
     if [ -n "$configured_dashboard_image" ] && \
-       ! echo "$s" | jq -e --arg expected "$configured_dashboard_image" \
-         '.containers[] | select(.name == "odh-dashboard" and .image == $expected)' >/dev/null; then
+       ! echo "$s" | jq -e --arg expected "$configured_dashboard_image" --arg name "$DASHBOARD_CONTAINER" \
+         '.containers[] | select(.name == $name and .image == $expected)' >/dev/null; then
       warn "Dashboard image has not reconciled to $configured_dashboard_image"
     fi
     case "$image_current" in
@@ -400,8 +428,8 @@ describe_state() {
   configured_dashboard_image=$(echo "$s" | jq -r '.configured_dashboard_image')
 
   if [ -n "$configured_dashboard_image" ] &&
-     ! echo "$s" | jq -e --arg expected "$configured_dashboard_image" \
-       '.containers[] | select(.name == "odh-dashboard" and .image == $expected)' >/dev/null; then
+     ! echo "$s" | jq -e --arg expected "$configured_dashboard_image" --arg name "$DASHBOARD_CONTAINER" \
+       '.containers[] | select(.name == $name and .image == $expected)' >/dev/null; then
     echo "${C_YELLOW}waiting for dashboard image${C_RESET}"
   elif [ "$pvc" != true ] && { [ "$modular" != true ] || [ "$count" = 0 ]; }; then
     echo "${C_DIM}not set up${C_RESET}"
@@ -557,7 +585,12 @@ cmd_setup() {
   [ ${#comps[@]} -eq 0 ] && comps=("dashboard")
 
   local c
-  for c in "${comps[@]}"; do validate_component "$c"; done
+  for c in "${comps[@]}"; do
+    validate_component "$c"
+    if [ "$CLUSTER_FLAVOR" = rhoai ] && [ "$c" != dashboard ]; then
+      die "RHOAI image overrides currently support dashboard only; modelcontroller still requires the ODH operator manifests"
+    fi
+  done
 
   if modular_dashboard_present; then
     local legacy_comps=()
@@ -573,7 +606,7 @@ cmd_setup() {
 
   local csv csv_json comps_json patch
   csv="$(find_csv)"
-  [ -n "$csv" ] || die "no opendatahub-operator CSV found in $OPERATOR_NS"
+  [ -n "$csv" ] || die "no operator CSV found in $OPERATOR_NS"
 
   csv_json=$(oc get csv "$csv" -n "$OPERATOR_NS" -o json)
   comps_json=$(printf '%s\n' "${comps[@]}" | jq -R . | jq -sc .)
@@ -749,7 +782,7 @@ wait_for_dashboard_image() {
     if [ "$actual" = "$expected" ]; then
       oc rollout status "deployment/$DASHBOARD_OPERATOR_DEPLOY" -n "$DASHBOARD_NS" --timeout="${timeout}s" || return 1
       actual=$(oc get deployment "$DASHBOARD_DEPLOY" -n "$DASHBOARD_NS" -o json 2>/dev/null \
-        | jq -r '.spec.template.spec.containers[] | select(.name == "odh-dashboard") | .image' 2>/dev/null) || actual=""
+        | jq -r --arg name "$DASHBOARD_CONTAINER" '.spec.template.spec.containers[] | select(.name == $name) | .image' 2>/dev/null) || actual=""
       [ "$actual" = "$expected" ] && return 0
     fi
     sleep 3
@@ -760,7 +793,7 @@ wait_for_dashboard_image() {
 copy_modular_dashboard_images() {
   local image_ref="$1" csv csv_json images patch expected
   csv="$(find_csv)"
-  [ -n "$csv" ] || die "no opendatahub-operator CSV found in $OPERATOR_NS"
+  [ -n "$csv" ] || die "no operator CSV found in $OPERATOR_NS"
   csv_json=$(oc get csv "$csv" -n "$OPERATOR_NS" -o json)
   images=$(modular_dashboard_images "$image_ref")
   patch=$(build_modular_dashboard_patch "$csv_json" "$images")
@@ -782,6 +815,9 @@ cmd_copy() {
   local component="${1:-}" tag="${2:-}"
   [ -n "$component" ] || die "usage: odh-manifests copy <component> [tag]"
   validate_component "$component"
+  if [ "$CLUSTER_FLAVOR" = rhoai ] && [ "$component" != dashboard ]; then
+    die "RHOAI image overrides currently support dashboard only; modelcontroller still requires the ODH operator manifests"
+  fi
 
   if [ "$component" = dashboard ] && modular_dashboard_present; then
     [ -n "$tag" ] || die "tag is required for the dashboard component"
@@ -804,7 +840,7 @@ cmd_copy() {
   esac
 
   info "Restarting operator to pick up new manifests"
-  confirm_run oc rollout restart deploy -n "$OPERATOR_NS" -l name=opendatahub-operator
+  confirm_run oc rollout restart deploy -n "$OPERATOR_NS" -l "$OPERATOR_POD_SELECTOR"
   wait_for_operator
   ok "Manifests copied and operator restarted"
 }
@@ -928,6 +964,16 @@ cmd_revert() {
     fi
   fi
 
+  if [ "$CLUSTER_FLAVOR" = rhoai ]; then
+    if [ "$keep_operator" = true ]; then
+      info "Keeping the RHOAI operator running so it can reconcile the restored dashboard image"
+    else
+      warn "No custom dashboard image override was recorded; leaving the RHOAI operator untouched"
+    fi
+    ok "Dashboard image revert complete"
+    return
+  fi
+
   if [ "$keep_operator" = false ]; then
     info "Scaling operator to 0"
     confirm_run oc scale "deployment/$OPERATOR_DEPLOY" -n "$OPERATOR_NS" --replicas=0
@@ -962,7 +1008,7 @@ cmd_revert() {
     confirm_run_stdin "$cleaned" "" oc replace -f -
     ok "CSV cleaned"
   else
-    warn "No opendatahub-operator CSV found, skipping CSV cleanup"
+    warn "No operator CSV found, skipping CSV cleanup"
   fi
 
   info "Deleting PVC $PVC_NAME"
@@ -1013,8 +1059,8 @@ interactive() {
     actions+=("switch"); labels+=("Switch dashboard tag")
   fi
   actions+=("manage"); labels+=("Manage another component")
-  if [ "$pvc" = true ]; then
-    actions+=("revert"); labels+=("Revert everything")
+  if [ "$pvc" = true ] || [ "$count" != "0" ]; then
+    actions+=("revert"); labels+=("Revert image overrides / manifests")
   fi
   actions+=("quit"); labels+=("Do nothing")
 
@@ -1049,17 +1095,24 @@ interactive_setup() {
   echo ""
   echo "${C_BOLD}Which components?${C_RESET}"
   echo "  1) dashboard"
-  echo "  2) modelcontroller"
-  echo "  3) both"
-  echo ""
   local choice comps=()
-  read -r -p "Choose: " choice </dev/tty
-  case "$choice" in
-    1) comps=(dashboard) ;;
-    2) comps=(modelcontroller) ;;
-    3) comps=(dashboard modelcontroller) ;;
-    *) die "invalid choice" ;;
-  esac
+  if [ "$CLUSTER_FLAVOR" = rhoai ]; then
+    echo "  (RHOAI currently supports dashboard image overrides only)"
+    read -r -p "Choose: " choice </dev/tty
+    [ "$choice" = 1 ] || die "choose dashboard; modelcontroller manifests are not supported on RHOAI clusters"
+    comps=(dashboard)
+  else
+    echo "  2) modelcontroller"
+    echo "  3) both"
+    echo ""
+    read -r -p "Choose: " choice </dev/tty
+    case "$choice" in
+      1) comps=(dashboard) ;;
+      2) comps=(modelcontroller) ;;
+      3) comps=(dashboard modelcontroller) ;;
+      *) die "invalid choice" ;;
+    esac
+  fi
 
   local dashboard_tag="" mc_tag=""
   case " ${comps[*]} " in *" dashboard "*)
@@ -1116,15 +1169,22 @@ interactive_manage() {
   echo ""
   echo "${C_BOLD}Which component?${C_RESET}"
   echo "  1) dashboard"
-  echo "  2) modelcontroller"
-  echo ""
   local choice comp tag
-  read -r -p "Choose: " choice </dev/tty
-  case "$choice" in
-    1) comp=dashboard ;;
-    2) comp=modelcontroller ;;
-    *) die "invalid choice" ;;
-  esac
+  if [ "$CLUSTER_FLAVOR" = rhoai ]; then
+    echo "  (RHOAI currently supports dashboard image overrides only)"
+    read -r -p "Choose: " choice </dev/tty
+    [ "$choice" = 1 ] || die "choose dashboard; modelcontroller manifests are not supported on RHOAI clusters"
+    comp=dashboard
+  else
+    echo "  2) modelcontroller"
+    echo ""
+    read -r -p "Choose: " choice </dev/tty
+    case "$choice" in
+      1) comp=dashboard ;;
+      2) comp=modelcontroller ;;
+      *) die "invalid choice" ;;
+    esac
+  fi
 
   if [ "$comp" = dashboard ]; then
     tag="$(prompt_for_dashboard_image)"
@@ -1149,12 +1209,12 @@ interactive_manage() {
 
 usage() {
   cat <<EOF
-${C_BOLD}odh-manifests${C_RESET} — manage custom volume-mounted ODH component manifests
+${C_BOLD}odh-manifests${C_RESET} — manage custom component images on ODH and RHOAI clusters
 
 ${C_BOLD}USAGE${C_RESET}
   odh-manifests                          Interactive menu
   odh-manifests status [--json]          Show current state
-  odh-manifests setup [component...]     Create PVC and patch CSV (default: dashboard)
+  odh-manifests setup [component...]     Set up dashboard override or PVC manifests
   odh-manifests copy <component> [tag]   Copy manifests into the operator pod
   odh-manifests switch <component> [tag] Copy manifests and watch the rollout
   odh-manifests update                   Restart dashboard to pull the latest images
@@ -1165,7 +1225,7 @@ ${C_BOLD}FLAGS${C_RESET}
   -y, --yes         Skip the approval prompt before each cluster write
 
 ${C_BOLD}COMPONENTS${C_RESET}
-  dashboard         odh-dashboard image via module operator (or legacy PVC manifests)
+  dashboard         Dashboard image via ODH/RHOAI module operator or legacy PVC manifests
   modelcontroller   model-serving-api and odh-model-controller
 
 ${C_BOLD}SAFETY${C_RESET}
@@ -1202,6 +1262,7 @@ main() {
 
   require_deps
   require_cluster
+  configure_cluster_layout
 
   local cmd="${1:-}"
   [ $# -gt 0 ] && shift

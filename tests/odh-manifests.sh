@@ -6,6 +6,30 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # shellcheck source=../bin/odh-manifests
 source "$ROOT/bin/odh-manifests"
 
+(
+  source "$ROOT/bin/odh-manifests"
+  oc() { printf '%s\n' 'clusterserviceversion/rhods-operator.3.5.2'; }
+  configure_cluster_layout
+  [[ "$CLUSTER_FLAVOR" == rhoai && "$OPERATOR_NS" == redhat-ods-operator &&
+    "$DASHBOARD_NS" == redhat-ods-applications && "$DASHBOARD_DEPLOY" == rhods-dashboard &&
+    "$DASHBOARD_CONTAINER" == rhods-dashboard ]]
+  oc() {
+    printf '%s\n' '{"metadata":{"ownerReferences":[{"kind":"DataScienceCluster"}]},"spec":{"template":{"spec":{"containers":[{"env":[{"name":"RELATED_IMAGE_ODH_DASHBOARD_IMAGE","value":"quay.io/opendatahub/odh-dashboard:main"}]}]}}}}'
+  }
+  modular_dashboard_present
+)
+
+rhoai_revert_output=$(
+  source "$ROOT/bin/odh-manifests"
+  CLUSTER_FLAVOR=rhoai
+  modular_dashboard_present() { return 0; }
+  find_csv() { printf '%s\n' rhods-operator.3.5.2; }
+  oc() { printf '%s\n' '{"metadata":{"annotations":{}}}'; }
+  confirm_run() { echo MUTATION; }
+  cmd_revert
+)
+! grep -q MUTATION <<< "$rhoai_revert_output"
+
 fixture='{"metadata":{"annotations":{}},"spec":{"install":{"spec":{"deployments":[{"spec":{"replicas":0,"template":{"spec":{"containers":[{"env":[]}],"volumes":[]}}}}]}}}}'
 
 patch=$(build_csv_patch "$fixture" '["dashboard","modelcontroller"]')

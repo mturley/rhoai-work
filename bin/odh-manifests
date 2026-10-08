@@ -21,6 +21,7 @@ DASHBOARD_CONTAINER="odh-dashboard"
 DASHBOARD_POD_SELECTOR="app=odh-dashboard"
 DASHBOARD_OPERATOR_DEPLOY="dashboard-operator"
 CLUSTER_FLAVOR="odh"
+RHOAI_VERSION=""
 PVC_NAME="custom-odh-dev-manifests"
 VOLUME_NAME="custom-dev-manifests"
 DASHBOARD_REPO="opendatahub/odh-dashboard"
@@ -176,8 +177,12 @@ find_csv() {
 }
 
 configure_cluster_layout() {
-  if oc get csv -n redhat-ods-operator -o name 2>/dev/null | grep -q 'rhods-operator'; then
+  local rhoai_csv
+  rhoai_csv=$(oc get csv -n redhat-ods-operator -o name 2>/dev/null \
+    | grep 'rhods-operator' | head -n1 | cut -d/ -f2 || true)
+  if [ -n "$rhoai_csv" ]; then
     CLUSTER_FLAVOR="rhoai"
+    RHOAI_VERSION="${rhoai_csv#rhods-operator.}"
     OPERATOR_NS="redhat-ods-operator"
     OPERATOR_DEPLOY="rhods-operator"
     OPERATOR_POD_SELECTOR="name=rhods-operator"
@@ -199,8 +204,29 @@ modular_dashboard_present() {
 }
 
 find_operator_pod() {
-  oc get po -l "$OPERATOR_POD_SELECTOR" -n "$OPERATOR_NS" \
-    -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true
+  oc get po -l "$OPERATOR_POD_SELECTOR" -n "$OPERATOR_NS" -o json 2>/dev/null \
+    | jq -r '[.items[]? | select(.metadata.deletionTimestamp == null and .status.phase == "Running")]
+             | sort_by(.metadata.creationTimestamp) | last | .metadata.name // empty' 2>/dev/null || true
+}
+
+copy_to_operator() {
+  local source="$1" mount_path="$2" pod attempt
+  for attempt in 1 2 3 4 5; do
+    pod="$(find_operator_pod)"
+    if [ -z "$pod" ]; then
+      sleep 2
+      continue
+    fi
+    if confirm_run oc cp "$source" "$OPERATOR_NS/$pod:$mount_path"; then
+      return 0
+    fi
+    if oc get pod "$pod" -n "$OPERATOR_NS" >/dev/null 2>&1; then
+      return 1
+    fi
+    warn "Operator pod $pod was replaced during copy; retrying with the current pod"
+    sleep 2
+  done
+  die "could not find a stable running operator pod to copy manifests into"
 }
 
 wait_for_operator() {
@@ -246,14 +272,14 @@ gather_status() {
   configured_dashboard_image=''
   if [ -n "$csv_name" ]; then
     csv_json=$(oc get csv "$csv_name" -n "$OPERATOR_NS" -o json)
-    overridden=$(jq -c --arg vol "$VOLUME_NAME" --argjson modular "$modular_dashboard" '
+    overridden=$(jq -c --arg vol "$VOLUME_NAME" --argjson modular "$modular_dashboard" --argjson rhoai "$([ "$CLUSTER_FLAVOR" = rhoai ] && echo true || echo false)" '
       [.spec.install.spec.deployments[0].spec.template.spec.containers[0] as $container
        | ($container.volumeMounts // [])[]
        | select(.name == $vol and has("subPath")) | .subPath]
-      + (if $modular and .metadata.annotations["odh-manifests.dev/original-dashboard-images"] != null
+      + (if ($modular or $rhoai) and .metadata.annotations["odh-manifests.dev/original-dashboard-images"] != null
          then ["dashboard"] else [] end) | unique
     ' <<< "$csv_json")
-    if [ "$modular_dashboard" = true ]; then
+    if [ "$modular_dashboard" = true ] || [ "$CLUSTER_FLAVOR" = rhoai ]; then
       configured_dashboard_image=$(jq -r '[.spec.install.spec.deployments[0].spec.template.spec.containers[0].env[]?
         | select(.name == "RELATED_IMAGE_ODH_DASHBOARD_IMAGE") | .value][0] // ""' <<< "$csv_json")
     fi
@@ -382,7 +408,7 @@ print_status() {
   echo "${C_BOLD}User${C_RESET}       $(oc whoami 2>/dev/null || echo unknown)"
   echo ""
   echo "${C_BOLD}Setup state:${C_RESET} $(describe_state "$s")"
-  if [ "$CLUSTER_FLAVOR" = rhoai ] && [ "$(echo "$s" | jq -r '.modular_dashboard')" = true ]; then
+  if [ "$CLUSTER_FLAVOR" = rhoai ]; then
     echo "  PVC              not required for RHOAI dashboard image overrides"
   else
     echo "  PVC              $PVC_NAME $([ "$pvc" = true ] && echo "${C_GREEN}exists${C_RESET}" || echo "${C_DIM}absent${C_RESET}")"
@@ -592,7 +618,10 @@ cmd_setup() {
     fi
   done
 
-  if modular_dashboard_present; then
+  if [ "$CLUSTER_FLAVOR" = rhoai ] && [[ "$RHOAI_VERSION" != 3.4.* && "$RHOAI_VERSION" != 3.5.* ]]; then
+    die "RHOAI version $RHOAI_VERSION is not supported (expected 3.4.x or 3.5.x)"
+  fi
+  if [ "$CLUSTER_FLAVOR" = rhoai ] || modular_dashboard_present; then
     local legacy_comps=()
     for c in "${comps[@]}"; do
       [ "$c" = dashboard ] || legacy_comps+=("$c")
@@ -662,7 +691,7 @@ cmd_setup() {
 # ---------------------------------------------------------------------------
 
 copy_dashboard_manifests() (
-  local image_ref="$1" pod="$2" tmp mod_params key_val key tag
+  local image_ref="$1" tmp mod_params tag
   tag="$image_ref"
   if [[ "$image_ref" == quay.io/* ]]; then
     tag=""
@@ -671,18 +700,18 @@ copy_dashboard_manifests() (
   fi
 
   [ -d "$ODH_DIR/manifests" ] || die "dashboard manifests not found at $ODH_DIR/manifests"
-
   tmp=$(mktemp -d)
   trap 'rm -rf "$tmp"' EXIT
-  cp -r "$ODH_DIR/manifests/." "$tmp/"
+  cp -R "$ODH_DIR/manifests/." "$tmp/"
 
-  # Core dashboard images
+  # Custom references replace only the dashboard image. Tags continue to
+  # update corresponding ODH images when those params are present.
   sed -i.bak "s|^odh-dashboard-image=.*|odh-dashboard-image=${image_ref}|" "$tmp/odh/params.env"
   if [ -n "$tag" ]; then
-    sed -i.bak "s|^core-bff-image=.*|core-bff-image=quay.io/opendatahub/odh-core-bff:${tag}|" "$tmp/odh/params.env"
-
-    # Per-module params.env files, preserving each image's repo
-    for mod_params in "$tmp"/modules/*/params.env; do
+    if [ -f "$tmp/odh/params.env" ]; then
+      sed -i.bak "s|^core-bff-image=.*|core-bff-image=quay.io/opendatahub/odh-core-bff:${tag}|" "$tmp/odh/params.env"
+    fi
+    for mod_params in "$tmp"/modules/*/params.env "$tmp/modular-architecture/params.env"; do
       [ -f "$mod_params" ] || continue
       sed -i.bak -E "s|(^[a-z-]+-ui-image=quay\.io/[^:]+):.*|\1:${tag}|" "$mod_params"
     done
@@ -690,18 +719,19 @@ copy_dashboard_manifests() (
 
   find "$tmp" -name '*.bak' -delete
 
-  info "Copying dashboard manifests (image: $image_ref) to $pod"
+  info "Copying dashboard manifests (image: $image_ref) to the operator pod"
   if [ "$ASSUME_YES" != true ]; then
     echo "" >&2
     echo "${C_BOLD}Image overrides to be written:${C_RESET}" >&2
-    grep -hE '^[a-z-]+(-image|-ui-image|-bff-image)=quay\.io/' "$tmp/odh/params.env" "$tmp"/modules/*/params.env \
-      | sed 's/^/  /' >&2
+    grep -hE '^[a-z-]+(-image|-ui-image|-bff-image)=quay\.io/' \
+      "$tmp/odh/params.env" "$tmp"/modules/*/params.env 2>/dev/null \
+      | sed 's/^/  /' >&2 || true
   fi
-  confirm_run oc cp "$tmp/." "$OPERATOR_NS/$pod:/opt/manifests/dashboard"
+  copy_to_operator "$tmp/." "/opt/manifests/dashboard"
 )
 
 copy_modelcontroller_manifests() (
-  local tag="$1" pod="$2" tmp
+  local tag="$1" tmp
 
   tmp=$(mktemp -d)
   trap 'rm -rf "$tmp"' EXIT
@@ -721,13 +751,13 @@ copy_modelcontroller_manifests() (
     info "Using upstream default images for modelcontroller"
   fi
 
-  info "Copying modelcontroller manifests to $pod"
+  info "Copying modelcontroller manifests to the operator pod"
   if [ "$ASSUME_YES" != true ] && [ -f "$tmp/repo/config/base/params.env" ]; then
     echo "" >&2
     echo "${C_BOLD}Image overrides to be written:${C_RESET}" >&2
     sed 's/^/  /' "$tmp/repo/config/base/params.env" >&2
   fi
-  confirm_run oc cp "$tmp/repo/config/." "$OPERATOR_NS/$pod:/opt/manifests/modelcontroller"
+  copy_to_operator "$tmp/repo/config/." "/opt/manifests/modelcontroller"
 )
 
 # The module operator receives operand images from the main operator via
@@ -790,6 +820,40 @@ wait_for_dashboard_image() {
   die "dashboard image did not change to $expected (current deployment image: ${actual:-unknown}); check dashboard-operator logs"
 }
 
+wait_for_legacy_dashboard_image() {
+  local image_ref="$1" timeout="${2:-300}" deadline=$((SECONDS + ${2:-300})) expected actual
+  expected="$image_ref"
+  [[ "$expected" == quay.io/* ]] || expected="quay.io/${DASHBOARD_REPO}:${image_ref}"
+  info "Waiting for $DASHBOARD_DEPLOY to use $expected..."
+  while (( SECONDS < deadline )); do
+    actual=$(oc get deployment "$DASHBOARD_DEPLOY" -n "$DASHBOARD_NS" -o json 2>/dev/null \
+      | jq -r --arg name "$DASHBOARD_CONTAINER" '.spec.template.spec.containers[] | select(.name == $name) | .image' 2>/dev/null) || actual=""
+    [ "$actual" = "$expected" ] && return 0
+    sleep 3
+  done
+  die "dashboard image did not change to $expected (current deployment image: ${actual:-unknown}); inspect the operator logs for manifest errors"
+}
+
+# RHOAI 3.4 injects RELATED_IMAGE_ODH_DASHBOARD_IMAGE into the legacy
+# manifests at operator startup. Editing params.env on a PVC is overwritten.
+copy_legacy_rhoai_dashboard_image() {
+  local image_ref="$1" csv csv_json images patch expected
+  csv="$(find_csv)"
+  [ -n "$csv" ] || die "no operator CSV found in $OPERATOR_NS"
+  csv_json=$(oc get csv "$csv" -n "$OPERATOR_NS" -o json)
+  images=$(modular_dashboard_images "$image_ref")
+  expected=$(jq -r '.[0].value' <<< "$images")
+  patch=$(build_modular_dashboard_patch "$csv_json" "$images" \
+    | jq -c '[.[] | select(.path != "/spec/install/spec/deployments/0/spec/replicas")]')
+  if [ "$patch" != '[]' ]; then
+    info "Setting RHOAI 3.4 dashboard image on CSV $csv ($expected)"
+    confirm_run oc patch csv "$csv" -n "$OPERATOR_NS" --type json -p "$patch"
+  fi
+  wait_for_operator
+  wait_for_legacy_dashboard_image "$expected"
+  ok "Dashboard deployment now requests $expected"
+}
+
 copy_modular_dashboard_images() {
   local image_ref="$1" csv csv_json images patch expected
   csv="$(find_csv)"
@@ -819,6 +883,16 @@ cmd_copy() {
     die "RHOAI image overrides currently support dashboard only; modelcontroller still requires the ODH operator manifests"
   fi
 
+  if [ "$component" = dashboard ] && [ "$CLUSTER_FLAVOR" = rhoai ]; then
+    [ -n "$tag" ] || die "tag is required for the dashboard component"
+    case "$RHOAI_VERSION" in
+      3.4.*) copy_legacy_rhoai_dashboard_image "$tag" ;;
+      3.5.*) modular_dashboard_present || die "RHOAI $RHOAI_VERSION has no dashboard module operator"
+             copy_modular_dashboard_images "$tag" ;;
+      *) die "RHOAI version $RHOAI_VERSION is not supported (expected 3.4.x or 3.5.x)" ;;
+    esac
+    return
+  fi
   if [ "$component" = dashboard ] && modular_dashboard_present; then
     [ -n "$tag" ] || die "tag is required for the dashboard component"
     copy_modular_dashboard_images "$tag"
@@ -832,16 +906,19 @@ cmd_copy() {
   case "$component" in
     dashboard)
       [ -n "$tag" ] || die "tag is required for the dashboard component"
-      copy_dashboard_manifests "$tag" "$pod"
+      copy_dashboard_manifests "$tag"
       ;;
     modelcontroller)
-      copy_modelcontroller_manifests "$tag" "$pod"
+      copy_modelcontroller_manifests "$tag"
       ;;
   esac
 
   info "Restarting operator to pick up new manifests"
   confirm_run oc rollout restart deploy -n "$OPERATOR_NS" -l "$OPERATOR_POD_SELECTOR"
   wait_for_operator
+  if [ "$component" = dashboard ] && ! modular_dashboard_present; then
+    wait_for_legacy_dashboard_image "$tag"
+  fi
   ok "Manifests copied and operator restarted"
 }
 
@@ -941,7 +1018,7 @@ build_modular_restore_patch() {
 
 cmd_revert() {
   local keep_operator=false modular_csv modular_json image_names image_patch original
-  if modular_dashboard_present; then
+  if [ "$CLUSTER_FLAVOR" = rhoai ] || modular_dashboard_present; then
     modular_csv="$(find_csv)"
     if [ -n "$modular_csv" ]; then
       modular_json=$(oc get csv "$modular_csv" -n "$OPERATOR_NS" -o json)
@@ -956,7 +1033,11 @@ cmd_revert() {
         local original_dashboard_image
         original_dashboard_image=$(jq -r '[.[] | select(.name == "RELATED_IMAGE_ODH_DASHBOARD_IMAGE") | .value][0] // ""' <<< "$original")
         if [ -n "$original_dashboard_image" ]; then
-          wait_for_dashboard_image "$original_dashboard_image"
+          if [ "$CLUSTER_FLAVOR" = rhoai ] && [[ "$RHOAI_VERSION" == 3.4.* ]]; then
+            wait_for_legacy_dashboard_image "$original_dashboard_image"
+          else
+            wait_for_dashboard_image "$original_dashboard_image"
+          fi
         else
           warn "Prior dashboard image came from the operator defaults; allow its reconciliation to restore the deployment"
         fi
@@ -1134,7 +1215,10 @@ interactive_setup() {
 
   echo ""
   echo "${C_BOLD}Plan${C_RESET}"
-  if modular_dashboard_present; then
+  if [ "$CLUSTER_FLAVOR" = rhoai ]; then
+    echo "  1. Configure RHOAI $RHOAI_VERSION dashboard image on the CSV (${dashboard_tag:-unchanged})"
+    echo "  2. Wait for the operator to update the dashboard deployment"
+  elif modular_dashboard_present; then
     echo "  1. Configure dashboard module image on the CSV (${dashboard_tag:-unchanged})"
     echo "  2. Set up PVC and copy manifests for modelcontroller, if selected"
     echo "  3. Wait for the module operator to update the dashboard deployment"

@@ -629,7 +629,13 @@ cmd_setup() {
 # ---------------------------------------------------------------------------
 
 copy_dashboard_manifests() (
-  local tag="$1" pod="$2" tmp mod_params key_val key
+  local image_ref="$1" pod="$2" tmp mod_params key_val key tag
+  tag="$image_ref"
+  if [[ "$image_ref" == quay.io/* ]]; then
+    tag=""
+  else
+    image_ref="quay.io/${DASHBOARD_REPO}:${tag}"
+  fi
 
   [ -d "$ODH_DIR/manifests" ] || die "dashboard manifests not found at $ODH_DIR/manifests"
 
@@ -638,18 +644,20 @@ copy_dashboard_manifests() (
   cp -r "$ODH_DIR/manifests/." "$tmp/"
 
   # Core dashboard images
-  sed -i.bak "s|^odh-dashboard-image=.*|odh-dashboard-image=quay.io/${DASHBOARD_REPO}:${tag}|" "$tmp/odh/params.env"
-  sed -i.bak "s|^core-bff-image=.*|core-bff-image=quay.io/opendatahub/odh-core-bff:${tag}|" "$tmp/odh/params.env"
+  sed -i.bak "s|^odh-dashboard-image=.*|odh-dashboard-image=${image_ref}|" "$tmp/odh/params.env"
+  if [ -n "$tag" ]; then
+    sed -i.bak "s|^core-bff-image=.*|core-bff-image=quay.io/opendatahub/odh-core-bff:${tag}|" "$tmp/odh/params.env"
 
-  # Per-module params.env files, preserving each image's repo
-  for mod_params in "$tmp"/modules/*/params.env; do
-    [ -f "$mod_params" ] || continue
-    sed -i.bak -E "s|(^[a-z-]+-ui-image=quay\.io/[^:]+):.*|\1:${tag}|" "$mod_params"
-  done
+    # Per-module params.env files, preserving each image's repo
+    for mod_params in "$tmp"/modules/*/params.env; do
+      [ -f "$mod_params" ] || continue
+      sed -i.bak -E "s|(^[a-z-]+-ui-image=quay\.io/[^:]+):.*|\1:${tag}|" "$mod_params"
+    done
+  fi
 
   find "$tmp" -name '*.bak' -delete
 
-  info "Copying dashboard manifests (tag: $tag) to $pod"
+  info "Copying dashboard manifests (image: $image_ref) to $pod"
   if [ "$ASSUME_YES" != true ]; then
     echo "" >&2
     echo "${C_BOLD}Image overrides to be written:${C_RESET}" >&2
@@ -694,9 +702,12 @@ copy_modelcontroller_manifests() (
 # only the dashboard image: PR tags are not necessarily built for the BFF or
 # modules (e.g. pr-10142 is missing from their Quay repositories).
 modular_dashboard_images() {
-  local tag="$1"
-  jq -cn --arg tag "$tag" '[{name: "RELATED_IMAGE_ODH_DASHBOARD_IMAGE",
-    value: ("quay.io/opendatahub/odh-dashboard:" + $tag)}]'
+  local image_ref="$1"
+  if [[ "$image_ref" != quay.io/* ]]; then
+    image_ref="quay.io/${DASHBOARD_REPO}:${image_ref}"
+  fi
+  jq -cn --arg image "$image_ref" '[{name: "RELATED_IMAGE_ODH_DASHBOARD_IMAGE",
+    value: $image}]'
 }
 
 build_modular_dashboard_patch() {
@@ -747,15 +758,15 @@ wait_for_dashboard_image() {
 }
 
 copy_modular_dashboard_images() {
-  local tag="$1" csv csv_json images patch expected
+  local image_ref="$1" csv csv_json images patch expected
   csv="$(find_csv)"
   [ -n "$csv" ] || die "no opendatahub-operator CSV found in $OPERATOR_NS"
   csv_json=$(oc get csv "$csv" -n "$OPERATOR_NS" -o json)
-  images=$(modular_dashboard_images "$tag")
+  images=$(modular_dashboard_images "$image_ref")
   patch=$(build_modular_dashboard_patch "$csv_json" "$images")
-  expected="quay.io/${DASHBOARD_REPO}:${tag}"
+  expected=$(jq -r '.[0].value' <<< "$images")
   if [ "$patch" != '[]' ]; then
-    info "Setting dashboard module images on CSV $csv (tag: $tag)"
+    info "Setting dashboard module image on CSV $csv ($expected)"
     if [ "$ASSUME_YES" != true ]; then
       echo "The main operator injects these image overrides into $DASHBOARD_OPERATOR_DEPLOY:" >&2
       echo "$images" | jq -r '.[] | "  \(.name)=\(.value)"' >&2
@@ -841,10 +852,33 @@ cmd_update() {
   watch_rollout "$DASHBOARD_DEPLOY"
 }
 
+prompt_for_dashboard_image() {
+  local choice image_ref
+  echo "Choose dashboard image source:" >&2
+  echo "  1. Select an opendatahub tag" >&2
+  echo "  2. Paste a quay.io image URI" >&2
+  read -r -p "Choose [1/2]: " choice </dev/tty
+  case "$choice" in
+    1) prompt_for_tag dashboard ;;
+    2)
+      read -r -p "Quay image URI (quay.io/repository/image:tag): " image_ref </dev/tty
+      [[ "$image_ref" =~ ^quay\.io/[^[:space:]]+:[^[:space:]]+$ ]] || die "expected a quay.io image URI including a tag"
+      echo "$image_ref"
+      ;;
+    *) die "choose 1 or 2" ;;
+  esac
+}
+
 cmd_switch() {
   local component="${1:-dashboard}" tag="${2:-}"
   validate_component "$component"
-  [ -n "$tag" ] || tag="$(prompt_for_tag "$component")"
+  if [ -z "$tag" ]; then
+    if [ "$component" = dashboard ]; then
+      tag="$(prompt_for_dashboard_image)"
+    else
+      tag="$(prompt_for_tag "$component")"
+    fi
+  fi
 
   cmd_copy "$component" "$tag"
 

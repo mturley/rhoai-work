@@ -13,6 +13,7 @@ jq -e '[.[] | select(.path | endswith("/volumeMounts"))] |
   length == 1 and (.[0].value | map(.subPath) == ["dashboard", "modelcontroller"])' <<< "$patch" >/dev/null
 
 overrides=$(modular_dashboard_images pr-10142)
+[[ $(jq -r '.[0].value' <<< "$(modular_dashboard_images quay.io/example/dashboard:dev)") == quay.io/example/dashboard:dev ]]
 patch=$(build_modular_dashboard_patch "$fixture" "$overrides")
 jq -e 'length == 3 and
   ([.[] | select(.path | endswith("/replicas"))] | length == 1) and
